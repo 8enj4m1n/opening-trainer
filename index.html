@@ -62,6 +62,7 @@
   .side-badge{font-family:'JetBrains Mono',monospace;font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:3px 8px;border-radius:20px;border:1px solid var(--line);color:var(--muted);}
   .board-outer{width:100%;aspect-ratio:1/1;border:2px solid var(--line);border-radius:4px;overflow:hidden;}
   .board{display:grid;grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);width:100%;height:100%;}
+  .board.reviewing{filter:grayscale(.35) brightness(.85);}
   .sq{position:relative;display:flex;align-items:center;justify-content:center;cursor:default;user-select:none;}
   .sq.light{background:var(--board-light);}
   .sq.dark{background:var(--board-dark);}
@@ -317,6 +318,7 @@
   let wrongAttempts = 0;
   let practiceFilter = 'all';
   let awaitingGoBack = false;
+  let reviewOffset = 0; // 0 = live position; >0 = viewing that many plies back (never past moveIndex, so it can't reveal unplayed moves)
   let drillFinished = false;
   let checksGiven = { w: 0, b: 0 };
   let hintStage = 0;      // 0 = nothing shown yet this move, 1 = piece highlighted, 2 = move revealed
@@ -339,8 +341,25 @@
 
   function currentOrientationIsBlack(){ return currentDrill && currentDrill.userColor === 'b'; }
 
+  // Replays the drill up to (but never past) `idx` plies already played, for review navigation.
+  // Bounded by moveIndex by the caller, so this can never surface an unplayed ("future") move.
+  function positionAt(idx){
+    const t = new Chess();
+    const checks = { w: 0, b: 0 };
+    for(let i = 0; i < idx && currentDrill && i < currentDrill.moves.length; i++){
+      const mover = t.turn();
+      if(!t.move(currentDrill.moves[i], { sloppy: true })) break;
+      if(t.in_check()) checks[mover]++;
+    }
+    return { chess: t, checks: checks };
+  }
+
   function renderBoard(){
-    const arr = chess.board();
+    const reviewing = reviewOffset > 0;
+    const viewedIdx = Math.max(0, moveIndex - reviewOffset);
+    const viewed = reviewing ? positionAt(viewedIdx) : null;
+    const arr = reviewing ? viewed.chess.board() : chess.board();
+    const checksForBadge = reviewing ? viewed.checks : checksGiven;
     const flip = currentOrientationIsBlack();
     const rowOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
     const colOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
@@ -358,17 +377,17 @@
         if(cell){
           const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p);
           if(cell.type === 'k' && currentDrill){
-            const checksOnThisKing = checksGiven[cell.color === 'w' ? 'b' : 'w'] || 0;
+            const checksOnThisKing = checksForBadge[cell.color === 'w' ? 'b' : 'w'] || 0;
             const remaining = Math.max(0, CHECKS_TO_WIN - checksOnThisKing);
             const cc = document.createElement('span'); cc.className = 'check-count'; cc.textContent = remaining;
             div.appendChild(cc);
           }
         }
-        if(selectedSquare === sqName) div.classList.add('selected');
-        if(hintSquare === sqName) div.classList.add('hint');
-        const target = legalTargets.find(t => t.to === sqName);
+        if(!reviewing && selectedSquare === sqName) div.classList.add('selected');
+        if(!reviewing && hintSquare === sqName) div.classList.add('hint');
+        const target = reviewing ? null : legalTargets.find(t => t.to === sqName);
         if(target){ const marker=document.createElement('span'); marker.className = cell ? 'ring' : 'dot'; div.appendChild(marker); }
-        const isUsersTurn = currentDrill && chess.turn() === currentDrill.userColor && moveIndex < currentDrill.moves.length;
+        const isUsersTurn = !reviewing && currentDrill && chess.turn() === currentDrill.userColor && moveIndex < currentDrill.moves.length;
         const clickable = isUsersTurn && ((cell && cell.color === currentDrill.userColor) || target);
         if(clickable){
           div.classList.add('selectable'); div.tabIndex = 0;
@@ -378,9 +397,25 @@
         boardEl.appendChild(div);
       });
     });
+    boardEl.classList.toggle('reviewing', reviewing);
+    if(reviewing) setStatus('Reviewing move ' + viewedIdx + ' of ' + moveIndex + ' — press → to return.', 'info');
   }
 
   function setStatus(msg, kind){ statusEl.textContent = msg; statusEl.className = 'status ' + (kind || 'info'); }
+
+  // Recomputes the real (non-review) status line, for when arrow-key review returns to the live position.
+  function refreshLiveStatus(){
+    if(!currentDrill) return;
+    if(drillFinished){
+      const viaThreeCheck = checksGiven[currentDrill.userColor] >= CHECKS_TO_WIN;
+      const lead = viaThreeCheck ? 'Three-check win — ' : 'Line complete — ';
+      setStatus(lead + 'that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '. Press Next for another.', 'ok');
+    } else if(awaitingGoBack){
+      setStatus('Wrong move — go back.', 'err');
+    } else {
+      setStatus('Your move.', 'info');
+    }
+  }
 
   function renderLedger(){
     if(!currentDrill){ ledgerEl.innerHTML = '<div class="empty" style="border:none;">Nothing played yet</div>'; return; }
@@ -446,7 +481,7 @@
     currentDrill = drill;
     chess.reset();
     moveIndex = 0; selectedSquare = null; legalTargets = []; wrongAttempts = 0;
-    awaitingGoBack = false; checksGiven = { w: 0, b: 0 };
+    awaitingGoBack = false; checksGiven = { w: 0, b: 0 }; reviewOffset = 0;
     resetHint();
 
     const targetIndex = Math.max(0, Math.min(rec.moveIndex | 0, drill.moves.length));
@@ -495,7 +530,7 @@
     currentDrill = drill;
     chess.reset();
     moveIndex = 0; selectedSquare = null; legalTargets = []; wrongAttempts = 0;
-    awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 };
+    awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 }; reviewOffset = 0;
     resetHint();
     drillNameEl.textContent = drill.name;
     sideBadgeEl.textContent = 'Playing ' + (drill.userColor === 'w' ? 'White' : 'Black');
@@ -581,7 +616,7 @@
   function goBack(){
     if(!awaitingGoBack) return;
     chess.undo();
-    awaitingGoBack = false;
+    awaitingGoBack = false; reviewOffset = 0;
     selectedSquare = null; legalTargets = [];
     resetHint();
     setStatus('Your move.', 'info');
@@ -592,6 +627,7 @@
 
   hintBtn.addEventListener('click', () => {
     if(!currentDrill || moveIndex >= currentDrill.moves.length) return;
+    if(reviewOffset > 0){ reviewOffset = 0; renderBoard(); }
     const expected = currentDrill.moves[moveIndex];
     if(hintStage === 0){
       const vm = expectedMoveVerbose();
@@ -662,7 +698,7 @@
           currentDrill = null; drillNameEl.textContent='No line loaded'; sideBadgeEl.textContent='—';
           ledgerEl.innerHTML='<div class="empty" style="border:none;">Nothing played yet</div>'; boardEl.innerHTML='';
           hintBtn.disabled=true; restartBtn.disabled=true; setStatus('Line deleted.', 'info');
-          awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 };
+          awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 }; reviewOffset = 0;
           updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
           clearSession();
         }
@@ -685,6 +721,7 @@
   let editSelected = null;
   let editLegalTargets = [];
   let editingId = null;
+  let editCursor = 0; // how many of editorMoves are shown; stays at editorMoves.length except while arrow-key reviewing
 
   function editSide(){ return document.querySelector('input[name=fSide]:checked').value; }
 
@@ -705,15 +742,25 @@
     editChess.reset();
     for(const m of rec.editorMoves){ if(!editChess.move(m, { sloppy: true })) break; }
     editorMoves = rec.editorMoves.slice();
-    editSelected = null; editLegalTargets = [];
+    editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
     if(rec.fName) $('fName').value = rec.fName;
     if(rec.fSide === 'w' || rec.fSide === 'b'){ document.querySelector('input[name=fSide][value="'+rec.fSide+'"]').checked = true; }
     $('editMsg').textContent = 'Restored your unsaved draft.';
     $('editMsg').className = 'form-msg ok';
   }
 
+  function editPositionAt(idx){
+    const t = new Chess();
+    for(let i = 0; i < idx && i < editorMoves.length; i++){
+      if(!t.move(editorMoves[i], { sloppy: true })) break;
+    }
+    return t;
+  }
+
   function renderEditBoard(){
-    const arr = editChess.board();
+    const reviewing = editCursor < editorMoves.length;
+    const viewChess = reviewing ? editPositionAt(editCursor) : editChess;
+    const arr = viewChess.board();
     const flip = editSide() === 'b';
     const rowOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
     const colOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
@@ -730,10 +777,10 @@
         if(ci === 0){ const rl=document.createElement('span'); rl.className='coord rank'; rl.textContent=8-r; div.appendChild(rl); }
         if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
         if(cell){ const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p); }
-        if(editSelected === sqName) div.classList.add('selected');
-        const target = editLegalTargets.find(t => t.to === sqName);
+        if(!reviewing && editSelected === sqName) div.classList.add('selected');
+        const target = reviewing ? null : editLegalTargets.find(t => t.to === sqName);
         if(target){ const marker=document.createElement('span'); marker.className = cell ? 'ring' : 'dot'; div.appendChild(marker); }
-        const clickable = (cell && cell.color === editChess.turn()) || target;
+        const clickable = !reviewing && ((cell && cell.color === viewChess.turn()) || target);
         if(clickable){
           div.classList.add('selectable'); div.tabIndex = 0;
           div.addEventListener('click', () => onEditSquareClick(sqName));
@@ -742,7 +789,10 @@
         container.appendChild(div);
       });
     });
-    $('editTurnHint').textContent = (editChess.turn() === 'w' ? 'White' : 'Black') + ' to move';
+    container.classList.toggle('reviewing', reviewing);
+    $('editTurnHint').textContent = reviewing
+      ? ('Reviewing move ' + editCursor + ' of ' + editorMoves.length + ' — press → to return')
+      : (viewChess.turn() === 'w' ? 'White' : 'Black') + ' to move';
     analyzeEditPosition();
   }
 
@@ -755,7 +805,11 @@
       const num = document.createElement('div'); num.className = 'num'; num.textContent = (i/2+1)+'.'; row.appendChild(num);
       [i, i+1].forEach(idx => {
         const mv = document.createElement('div'); mv.className = 'mv';
-        if(idx < editorMoves.length) mv.textContent = editorMoves[idx];
+        if(idx < editorMoves.length){
+          mv.textContent = editorMoves[idx];
+          if(idx < editCursor) mv.classList.add('done');
+          if(idx === editCursor) mv.classList.add('current');
+        }
         row.appendChild(mv);
       });
       el.appendChild(row);
@@ -778,14 +832,14 @@
     const result = editChess.move({ from: editSelected, to: sqName, promotion: 'q' });
     if(!result) return;
     editorMoves.push(result.san);
-    editSelected = null; editLegalTargets = [];
+    editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
     renderEditBoard(); renderEditLedger();
     $('editMsg').textContent = '';
     saveDraft();
   }
 
   function resetEditor(clearFields){
-    editChess.reset(); editorMoves = []; editSelected = null; editLegalTargets = []; editingId = null;
+    editChess.reset(); editorMoves = []; editSelected = null; editLegalTargets = []; editingId = null; editCursor = 0;
     if(clearFields){ $('fName').value = ''; document.querySelector('input[name=fSide][value="w"]').checked = true; }
     $('editBanner').style.display = 'none';
     $('saveChangesBtn').style.display = 'none';
@@ -811,7 +865,7 @@
     editChess.reset();
     drill.moves.forEach(m => editChess.move(m, { sloppy: true }));
     editorMoves = drill.moves.slice();
-    editSelected = null; editLegalTargets = [];
+    editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
     editingId = drill.id;
     $('fName').value = drill.name;
     document.querySelector('input[name=fSide][value="'+drill.userColor+'"]').checked = true;
@@ -824,7 +878,7 @@
 
   $('undoBtn').addEventListener('click', () => {
     if(editorMoves.length === 0) return;
-    editChess.undo(); editorMoves.pop(); editSelected = null; editLegalTargets = [];
+    editChess.undo(); editorMoves.pop(); editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
     renderEditBoard(); renderEditLedger();
     $('editMsg').textContent = '';
     saveDraft();
@@ -883,7 +937,7 @@
     editChess.reset();
     parsed.moves.forEach(m => editChess.move(m, { sloppy: true }));
     editorMoves = parsed.moves.slice();
-    editSelected = null; editLegalTargets = [];
+    editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
     renderEditBoard(); renderEditLedger();
     msg.textContent = 'Loaded '+parsed.moves.length+' ply onto the board.'; msg.className = 'form-msg ok';
     saveDraft();
@@ -921,9 +975,9 @@
     const t = new Chess();
     const ucis = [];
     const checks = { w: 0, b: 0 };
-    for(const san of editorMoves){
+    for(let i = 0; i < editCursor && i < editorMoves.length; i++){
       const mover = t.turn();
-      const mv = t.move(san, { sloppy: true });
+      const mv = t.move(editorMoves[i], { sloppy: true });
       if(!mv) break;
       ucis.push(mv.from + mv.to + (mv.promotion || ''));
       if(t.in_check()) checks[mover]++;
@@ -1136,6 +1190,33 @@
 
   document.addEventListener('fullscreenchange', () => {
     if(!document.fullscreenElement && wrapEl.classList.contains('focus-mode')){ setFocusMode(false); }
+  });
+
+  // ============================================================
+  // ARROW-KEY MOVE NAVIGATION (practice review + editor scrubbing)
+  // ============================================================
+  document.addEventListener('keydown', (e) => {
+    if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    const tag = e.target && e.target.tagName;
+    if(tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    const activeTab = document.querySelector('.tab.active');
+    const tabName = activeTab && activeTab.dataset.tab;
+
+    if(tabName === 'practice'){
+      if(!currentDrill) return;
+      e.preventDefault();
+      // Capped at moveIndex — review can only step through moves already played, never the unplayed line ahead.
+      if(e.key === 'ArrowLeft') reviewOffset = Math.min(moveIndex, reviewOffset + 1);
+      else reviewOffset = Math.max(0, reviewOffset - 1);
+      renderBoard();
+      if(reviewOffset === 0) refreshLiveStatus();
+    } else if(tabName === 'add'){
+      if(editorMoves.length === 0) return;
+      e.preventDefault();
+      if(e.key === 'ArrowLeft') editCursor = Math.max(0, editCursor - 1);
+      else editCursor = Math.min(editorMoves.length, editCursor + 1);
+      renderEditBoard(); renderEditLedger();
+    }
   });
 
   // ============================================================
