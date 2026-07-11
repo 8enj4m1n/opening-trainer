@@ -76,7 +76,7 @@
   .coord{position:absolute;font-family:'JetBrains Mono',monospace;font-size:9px;opacity:.55;}
   .coord.file{bottom:2px;right:3px;}
   .coord.rank{top:2px;left:3px;}
-  .check-count{position:absolute;top:2px;right:3px;min-width:14px;height:14px;line-height:14px;padding:0 2px;border-radius:50%;background:var(--brass);color:#1a1208;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;text-align:center;}
+  .check-count{position:absolute;top:-8px;left:50%;transform:translateX(-50%);width:20px;height:20px;line-height:20px;border-radius:50%;background:#c0392b;color:#fff;border:2px solid var(--panel);box-shadow:0 1px 3px rgba(0,0,0,.5);font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;text-align:center;z-index:2;}
 
   .status{margin-top:14px;min-height:24px;font-size:14px;}
   .status.ok{color:var(--felt);}
@@ -351,10 +351,9 @@
           const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p);
           if(cell.type === 'k' && currentDrill){
             const checksOnThisKing = checksGiven[cell.color === 'w' ? 'b' : 'w'] || 0;
-            if(checksOnThisKing > 0){
-              const cc = document.createElement('span'); cc.className = 'check-count'; cc.textContent = checksOnThisKing;
-              div.appendChild(cc);
-            }
+            const remaining = Math.max(0, CHECKS_TO_WIN - checksOnThisKing);
+            const cc = document.createElement('span'); cc.className = 'check-count'; cc.textContent = remaining;
+            div.appendChild(cc);
           }
         }
         if(selectedSquare === sqName) div.classList.add('selected');
