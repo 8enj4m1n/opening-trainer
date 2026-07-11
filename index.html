@@ -228,6 +228,7 @@
           <button class="ghost" id="undoBtn">Undo last move</button>
           <button class="ghost" id="clearBtn">Clear / start new</button>
           <button class="ghost" id="engineBtn" type="button">Engine: off</button>
+          <button class="ghost" id="deepenBtn" type="button">Deeper</button>
         </div>
         <div class="hint" id="engineInfo" style="text-align:center;min-height:16px;margin-top:6px;"></div>
 
@@ -301,6 +302,7 @@
   async function saveDb(){
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
     catch(e){ console.error('Storage error', e); }
+    enginePrescanDirty = true; // new/edited lines should get picked up by the engine pre-scan
   }
 
   // ============================================================
@@ -893,12 +895,17 @@
   const ENGINE_CACHE_KEY = 'repertoire-engine-cache';
   const ENGINE_ON_KEY = 'repertoire-engine-on';
   const ENGINE_TARGET_DEPTH = 22;
+  const ENGINE_PRESCAN_DEPTH = 12;
   const engineBtn = $('engineBtn');
+  const deepenBtn = $('deepenBtn');
   const engineInfoEl = $('engineInfo');
   let engine = null;
   let engineStatus = 'off'; // 'loading' | 'ready' | 'failed'
   let engineOn = false;
-  let engineBusy = null;    // { key, fen, ucis, turn } of the search in flight
+  let engineBusy = null;    // { key, fen, ucis, turn, startDepth, stopped?, prescan? } of the search in flight
+  let engineTargets = {};   // per-position depth targets raised by the Deeper button (not persisted)
+  let prescanQueue = null;
+  let enginePrescanDirty = true;
   let engineCache = {};
   try{ engineCache = JSON.parse(localStorage.getItem(ENGINE_CACHE_KEY) || '{}') || {}; }catch(e){ engineCache = {}; }
   try{ engineOn = localStorage.getItem(ENGINE_ON_KEY) === '1'; }catch(e){}
@@ -938,14 +945,18 @@
     return (v >= 0 ? '+' : '') + (v / 100).toFixed(2);
   }
 
+  function targetOf(key){ return Math.max(ENGINE_TARGET_DEPTH, engineTargets[key] || 0); }
+
   function renderEngineInfo(){
     const pos = editEnginePos();
     const c = engineCache[pos.key];
-    let txt = c ? 'Best: ' + c.san + ' · depth ' + c.depth + (c.score ? ' · ' + c.score : '') : '';
+    let txt = '';
+    if(c) txt = c.san === '—' ? 'No legal moves here (game over).' : 'Best: ' + c.san + ' · depth ' + c.depth + (c.score ? ' · ' + c.score : '');
     if(engineOn){
       if(engineStatus === 'loading') txt = txt || 'Loading engine (one-time ~1.6 MB)…';
       else if(engineStatus === 'failed') txt = 'Engine unavailable — try fully reloading the page.';
-      else if(engineBusy && engineBusy.key === pos.key) txt += (txt ? ' · ' : '') + 'analysing…';
+      else if(engineBusy && engineBusy.key === pos.key) txt += (txt ? ' · ' : '') + 'analysing to depth ' + targetOf(pos.key) + '…';
+      else if(engineBusy && engineBusy.prescan) txt += (txt ? ' · ' : '') + 'scanning library' + (prescanQueue ? ' (' + prescanQueue.length + ' left)' : '') + '…';
     }
     engineInfoEl.textContent = txt;
   }
@@ -955,17 +966,20 @@
       engineStatus = 'ready';
       engine.postMessage('ucinewgame');
       analyzeEditPosition();
+      maybePrescan();
       return;
     }
     if(!engineBusy) return;
     if(line.indexOf('bestmove') === 0){
       const finished = engineBusy; engineBusy = null;
       const mv = line.split(' ')[1];
-      if(mv === '(none)'){ engineCache[finished.key] = { san: '—', depth: ENGINE_TARGET_DEPTH, score: 'game over' }; }
+      if(mv === '(none)'){ engineCache[finished.key] = { san: '—', depth: 99, score: '', done: true }; }
+      const cur = engineCache[finished.key];
+      // a full (unstopped) search that gained no depth won't gain any next time either
+      if(cur && !finished.stopped && cur.depth <= finished.startDepth) cur.done = true;
       saveEngineCache();
-      const pos = editEnginePos();
-      if(engineOn && engineStatus === 'ready' && pos.key !== finished.key) analyzeEditPosition();
-      else renderEngineInfo();
+      renderEngineInfo();
+      if(engineOn && engineStatus === 'ready'){ analyzeEditPosition(); maybePrescan(); }
       return;
     }
     if(line.indexOf('info ') === 0){
@@ -1017,14 +1031,55 @@
     if(!engineOn || engineStatus !== 'ready') return;
     const pos = editEnginePos();
     const cached = engineCache[pos.key];
-    if(cached && cached.depth >= ENGINE_TARGET_DEPTH) return;
+    if(cached && (cached.done || cached.depth >= targetOf(pos.key))){ maybePrescan(); return; }
     if(engineBusy){
-      if(engineBusy.key !== pos.key) engine.postMessage('stop');
+      if(engineBusy.key !== pos.key){ engineBusy.stopped = true; engine.postMessage('stop'); }
       return;
     }
-    engineBusy = pos;
+    engineBusy = { key: pos.key, fen: pos.fen, ucis: pos.ucis, turn: pos.turn, startDepth: cached ? cached.depth : 0 };
     engine.postMessage(pos.ucis.length ? 'position startpos moves ' + pos.ucis.join(' ') : 'position startpos');
-    engine.postMessage('go movetime 5000 depth ' + ENGINE_TARGET_DEPTH);
+    engine.postMessage('go movetime 5000 depth ' + targetOf(pos.key));
+    renderEngineInfo();
+  }
+
+  // Walk every position of every saved line and give each a basic-depth look,
+  // so best moves are already waiting before you ever open a position yourself.
+  function buildPrescanQueue(){
+    const out = []; const seen = {};
+    db.drills.forEach(drill => {
+      const t = new Chess(); const ucis = []; const checks = { w: 0, b: 0 };
+      const push = () => {
+        const key = t.fen() + '|' + checks.w + '+' + checks.b;
+        if(seen[key]) return; seen[key] = true;
+        const c = engineCache[key];
+        if(c && (c.done || c.depth >= ENGINE_PRESCAN_DEPTH)) return;
+        out.push({ key: key, fen: t.fen(), ucis: ucis.slice(), turn: t.turn() });
+      };
+      push();
+      for(const san of drill.moves){
+        const mover = t.turn();
+        const mv = t.move(san, { sloppy: true });
+        if(!mv) break;
+        ucis.push(mv.from + mv.to + (mv.promotion || ''));
+        if(t.in_check()) checks[mover]++;
+        push();
+      }
+    });
+    return out;
+  }
+
+  function maybePrescan(){
+    if(!engineOn || engineStatus !== 'ready' || engineBusy) return;
+    if(enginePrescanDirty || !prescanQueue){ prescanQueue = buildPrescanQueue(); enginePrescanDirty = false; }
+    while(prescanQueue.length){
+      const pos = prescanQueue.shift();
+      const c = engineCache[pos.key];
+      if(c && (c.done || c.depth >= ENGINE_PRESCAN_DEPTH)) continue;
+      engineBusy = { key: pos.key, fen: pos.fen, ucis: pos.ucis, turn: pos.turn, startDepth: c ? c.depth : 0, prescan: true };
+      engine.postMessage(pos.ucis.length ? 'position startpos moves ' + pos.ucis.join(' ') : 'position startpos');
+      engine.postMessage('go movetime 3000 depth ' + ENGINE_PRESCAN_DEPTH);
+      break;
+    }
     renderEngineInfo();
   }
 
@@ -1032,11 +1087,25 @@
     engineOn = !engineOn;
     try{ localStorage.setItem(ENGINE_ON_KEY, engineOn ? '1' : ''); }catch(e){}
     engineBtn.textContent = 'Engine: ' + (engineOn ? 'on' : 'off');
-    if(engineOn){ loadEngine(); analyzeEditPosition(); }
+    if(engineOn){ loadEngine(); analyzeEditPosition(); maybePrescan(); }
     else{
-      if(engine && engineBusy) engine.postMessage('stop');
+      if(engine && engineBusy){ engineBusy.stopped = true; engine.postMessage('stop'); }
       renderEngineInfo();
     }
+  });
+
+  deepenBtn.addEventListener('click', () => {
+    if(!engineOn){
+      engineOn = true;
+      try{ localStorage.setItem(ENGINE_ON_KEY, '1'); }catch(e){}
+      engineBtn.textContent = 'Engine: on';
+      loadEngine();
+    }
+    const pos = editEnginePos();
+    const c = engineCache[pos.key];
+    engineTargets[pos.key] = Math.max(c ? c.depth : 0, targetOf(pos.key)) + 4;
+    if(c) delete c.done;
+    analyzeEditPosition();
   });
 
   // ============================================================
