@@ -183,6 +183,7 @@
         <button class="ghost" id="hintBtn" disabled>Hint</button>
         <button class="ghost" id="goBackBtn" style="display:none;">Go back</button>
         <button class="ghost" id="restartBtn" disabled>Restart line</button>
+        <button class="ghost" id="testAllBtn" type="button">Test all drills</button>
       </div>
       <div class="progress-note" id="progressNote"></div>
     </div>
@@ -323,6 +324,9 @@
   let checksGiven = { w: 0, b: 0 };
   let hintStage = 0;      // 0 = nothing shown yet this move, 1 = piece highlighted, 2 = move revealed
   let hintSquare = null;  // square of the piece to move, while hintStage >= 1
+  let challengeQueue = null; // array of remaining drill ids in a "Test all drills" run, or null when none is active
+  let challengeTotal = 0;
+  let challengeDone = 0;
 
   const boardEl = $('board');
   const statusEl = $('status');
@@ -332,6 +336,7 @@
   const checksBadgeEl = $('checksBadge');
   const progressNoteEl = $('progressNote');
   const shuffleBtn = $('shuffleBtn');
+  const testAllBtn = $('testAllBtn');
   const nextBtn = $('nextBtn');
   const hintBtn = $('hintBtn');
   const goBackBtn = $('goBackBtn');
@@ -441,12 +446,22 @@
   function eligibleDrills(){ return practiceFilter === 'all' ? db.drills : db.drills.filter(d => d.userColor === practiceFilter); }
 
   function renderProgressNote(){
+    if(challengeQueue !== null){
+      progressNoteEl.textContent = 'Challenge: ' + challengeDone + ' of ' + challengeTotal + ' done — ' + (challengeTotal - challengeDone) + ' left';
+      return;
+    }
     const pool = eligibleDrills();
     const total = pool.length;
     if(total === 0){ progressNoteEl.textContent = ''; return; }
     const completedCount = pool.filter(d => (d.completed || 0) > 0).length;
     const remaining = total - completedCount;
     progressNoteEl.textContent = completedCount + ' of ' + total + ' drills completed — ' + remaining + ' left';
+  }
+
+  function shuffleArray(arr){
+    const a = arr.slice();
+    for(let i = a.length - 1; i > 0; i--){ const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
   }
 
   function registerCheck(color){ checksGiven[color] = (checksGiven[color] || 0) + 1; }
@@ -519,11 +534,45 @@
   function resetHint(){ hintStage = 0; hintSquare = null; hintBtn.textContent = 'Hint'; }
 
   function shuffleDrill(){
+    challengeQueue = null; challengeTotal = 0; challengeDone = 0; // manual shuffle always exits a running challenge
     const pool = eligibleDrills();
     if(pool.length === 0){ setStatus('No lines match that filter yet. Add one in the library.', 'info'); renderProgressNote(); return; }
     let pick = pool[Math.floor(Math.random() * pool.length)];
     if(pool.length > 1 && currentDrill && pick.id === currentDrill.id){ pick = pool[(pool.indexOf(pick) + 1) % pool.length]; }
     startDrill(pick);
+  }
+
+  function startChallenge(){
+    const pool = eligibleDrills();
+    if(pool.length === 0){ setStatus('No lines match that filter yet. Add one in the library.', 'info'); return; }
+    challengeQueue = shuffleArray(pool.map(d => d.id));
+    challengeTotal = challengeQueue.length;
+    challengeDone = 0;
+    startDrill(db.drills.find(d => d.id === challengeQueue.shift()));
+  }
+
+  // "Next drill" steps sequentially through the library in normal practice — "Shuffle lines" is the random one.
+  function nextSequentialDrill(){
+    const pool = eligibleDrills();
+    if(pool.length === 0){ setStatus('No lines match that filter yet. Add one in the library.', 'info'); renderProgressNote(); return; }
+    const curIdx = currentDrill ? pool.findIndex(d => d.id === currentDrill.id) : -1;
+    startDrill(pool[(curIdx + 1) % pool.length]);
+  }
+
+  // Advances Next-drill flow: continues a running challenge queue if there is one, otherwise steps to the next drill in order.
+  function advanceDrill(){
+    if(challengeQueue !== null){
+      if(challengeQueue.length === 0){
+        setStatus('Challenge complete — ' + challengeDone + ' of ' + challengeTotal + ' lines. Nice work.', 'ok');
+        challengeQueue = null; challengeTotal = 0; challengeDone = 0;
+        renderProgressNote();
+        return;
+      }
+      const drill = db.drills.find(d => d.id === challengeQueue.shift());
+      if(drill) startDrill(drill); else advanceDrill();
+      return;
+    }
+    nextSequentialDrill();
   }
 
   function startDrill(drill){
@@ -560,8 +609,12 @@
     drillFinished = true;
     currentDrill.completed = (currentDrill.completed || 0) + 1;
     saveDb();
+    if(challengeQueue !== null) challengeDone++;
     const lead = viaThreeCheck ? 'Three-check win — ' : 'Line complete — ';
-    setStatus(lead + 'that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '. Press Next for another.', 'ok');
+    const tail = challengeQueue !== null
+      ? (challengeQueue.length > 0 ? ' Press Next to continue the challenge.' : ' That was the last one — press Next to finish the challenge.')
+      : ' Press Next for another.';
+    setStatus(lead + 'that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '.' + tail, 'ok');
     updateNextVisibility(); updateGoBackVisibility();
     renderLedger(); renderLibraryTab(); renderProgressNote();
     saveSession();
@@ -644,7 +697,8 @@
   restartBtn.addEventListener('click', () => { if(currentDrill) startDrill(currentDrill); });
   goBackBtn.addEventListener('click', goBack);
   shuffleBtn.addEventListener('click', shuffleDrill);
-  nextBtn.addEventListener('click', shuffleDrill);
+  nextBtn.addEventListener('click', advanceDrill);
+  testAllBtn.addEventListener('click', startChallenge);
   $('colorFilter').addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-filter]');
     if(!btn) return;
