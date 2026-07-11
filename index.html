@@ -158,6 +158,7 @@
       <h1>The Ledger</h1>
       <p class="tag">Play a line out on the board to save it. Rewind and try a different reply whenever you want a second line from the same position.</p>
     </div>
+    <button class="ghost" id="reportBtn" type="button">Report an issue</button>
   </header>
 
   <div class="layout">
@@ -881,6 +882,27 @@
 
   document.addEventListener('fullscreenchange', () => {
     if(!document.fullscreenElement && wrapEl.classList.contains('focus-mode')){ setFocusMode(false); }
+  });
+
+  // ============================================================
+  // ERROR REPORTING
+  // ============================================================
+  const reportBtn = $('reportBtn');
+  reportBtn.addEventListener('click', () => {
+    if(typeof Sentry === 'undefined' || !Sentry.captureMessage){
+      alert('Error reporting isn\'t available right now — it may be blocked by an ad blocker or content blocker.');
+      return;
+    }
+    const eventId = Sentry.captureMessage('User-initiated issue report', {
+      level: 'info',
+      extra: {
+        activeTab: document.querySelector('.tab.active') ? document.querySelector('.tab.active').dataset.tab : null,
+        currentDrillId: currentDrill ? currentDrill.id : null,
+        currentDrillName: currentDrill ? currentDrill.name : null,
+        moveIndex: moveIndex
+      }
+    });
+    Sentry.showReportDialog({ eventId: eventId });
   });
 
   // ============================================================
