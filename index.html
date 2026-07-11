@@ -233,6 +233,8 @@
 <script>
 (function(){
   const STORAGE_KEY = 'repertoire-data';
+  const SESSION_KEY = 'repertoire-session';
+  const DRAFT_KEY = 'repertoire-draft';
   const FILES = ['a','b','c','d','e','f','g','h'];
   const PIECE_GLYPH = {
     w:{p:'♙',n:'♘',b:'♗',r:'♖',q:'♕',k:'♔'},
@@ -380,6 +382,56 @@
   function updateGoBackVisibility(){ goBackBtn.style.display = awaitingGoBack ? 'inline-block' : 'none'; }
   function updateNextVisibility(){ nextBtn.style.display = drillFinished ? 'inline-block' : 'none'; }
 
+  function saveSession(){
+    if(!currentDrill){ clearSession(); return; }
+    try{ localStorage.setItem(SESSION_KEY, JSON.stringify({ drillId: currentDrill.id, moveIndex })); }
+    catch(e){ console.error('Session storage error', e); }
+  }
+  function clearSession(){ try{ localStorage.removeItem(SESSION_KEY); }catch(e){} }
+
+  // Resumes practice progress after a reload: only { drillId, moveIndex } is stored —
+  // the position, check tally, and completion state are all deterministically replayed
+  // from the drill's own move list, so they can't drift out of sync with saved data.
+  function restoreSession(){
+    let rec;
+    try{ rec = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); }catch(e){ rec = null; }
+    if(!rec || !rec.drillId) return false;
+    const drill = db.drills.find(d => d.id === rec.drillId);
+    if(!drill){ clearSession(); return false; }
+
+    currentDrill = drill;
+    chess.reset();
+    moveIndex = 0; selectedSquare = null; legalTargets = []; wrongAttempts = 0;
+    awaitingGoBack = false; checksGiven = { w: 0, b: 0 };
+    resetHint();
+
+    const targetIndex = Math.max(0, Math.min(rec.moveIndex | 0, drill.moves.length));
+    for(let i = 0; i < targetIndex; i++){
+      const mover = chess.turn();
+      const res = chess.move(drill.moves[i], { sloppy: true });
+      if(!res) break;
+      moveIndex++;
+      if(chess.in_check()) registerCheck(mover);
+    }
+
+    const viaThreeCheck = checksGiven[drill.userColor] >= CHECKS_TO_WIN;
+    drillFinished = viaThreeCheck || moveIndex >= drill.moves.length;
+
+    drillNameEl.textContent = drill.name;
+    sideBadgeEl.textContent = 'Playing ' + (drill.userColor === 'w' ? 'White' : 'Black');
+    hintBtn.disabled = false; restartBtn.disabled = false;
+    updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
+    renderLedger(); renderBoard();
+
+    if(drillFinished){
+      const lead = viaThreeCheck ? 'Three-check win — ' : 'Line complete — ';
+      setStatus(lead + 'resumed. Press Next for another.', 'ok');
+    }else{
+      setStatus('Your move. (resumed)', 'info');
+    }
+    return true;
+  }
+
   function expectedMoveVerbose(){
     if(!currentDrill || moveIndex >= currentDrill.moves.length) return null;
     const expected = currentDrill.moves[moveIndex];
@@ -421,7 +473,7 @@
     if(!currentDrill) return;
     renderChecksBadge(); renderLedger(); renderBoard();
     if(moveIndex >= currentDrill.moves.length){ completeDrill(false); }
-    else{ resetHint(); setStatus('Your move.', 'info'); }
+    else{ resetHint(); setStatus('Your move.', 'info'); saveSession(); }
   }
 
   function completeDrill(viaThreeCheck){
@@ -432,6 +484,7 @@
     setStatus(lead + 'that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '. Press Next for another.', 'ok');
     updateNextVisibility(); updateGoBackVisibility();
     renderLedger(); renderLibraryTab();
+    saveSession();
   }
 
   function onSquareClick(sqName){
@@ -489,6 +542,7 @@
     setStatus('Your move.', 'info');
     updateGoBackVisibility();
     renderLedger(); renderBoard();
+    saveSession();
   }
 
   hintBtn.addEventListener('click', () => {
@@ -564,6 +618,7 @@
           hintBtn.disabled=true; restartBtn.disabled=true; setStatus('Line deleted.', 'info');
           awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 };
           updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
+          clearSession();
         }
         if(editingId === drill.id){ resetEditor(true); }
         saveDb();
@@ -586,6 +641,30 @@
   let editingId = null;
 
   function editSide(){ return document.querySelector('input[name=fSide]:checked').value; }
+
+  // Only persists a draft for a brand-new, not-yet-saved line (editingId null) —
+  // edits to an already-saved drill have their own explicit Save changes / cancel flow.
+  function saveDraft(){
+    if(editingId) return;
+    const name = $('fName').value;
+    if(editorMoves.length === 0 && !name.trim()){ clearDraft(); return; }
+    try{ localStorage.setItem(DRAFT_KEY, JSON.stringify({ editorMoves: editorMoves.slice(), fName: name, fSide: editSide() })); }
+    catch(e){ console.error('Draft storage error', e); }
+  }
+  function clearDraft(){ try{ localStorage.removeItem(DRAFT_KEY); }catch(e){} }
+  function restoreDraft(){
+    let rec;
+    try{ rec = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'); }catch(e){ rec = null; }
+    if(!rec || !Array.isArray(rec.editorMoves) || rec.editorMoves.length === 0) return;
+    editChess.reset();
+    for(const m of rec.editorMoves){ if(!editChess.move(m, { sloppy: true })) break; }
+    editorMoves = rec.editorMoves.slice();
+    editSelected = null; editLegalTargets = [];
+    if(rec.fName) $('fName').value = rec.fName;
+    if(rec.fSide === 'w' || rec.fSide === 'b'){ document.querySelector('input[name=fSide][value="'+rec.fSide+'"]').checked = true; }
+    $('editMsg').textContent = 'Restored your unsaved draft.';
+    $('editMsg').className = 'form-msg ok';
+  }
 
   function renderEditBoard(){
     const arr = editChess.board();
@@ -655,6 +734,7 @@
     editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     $('editMsg').textContent = '';
+    saveDraft();
   }
 
   function resetEditor(clearFields){
@@ -666,6 +746,7 @@
     $('saveNewBtn').style.display = 'inline-block';
     $('editMsg').textContent = '';
     renderEditBoard(); renderEditLedger();
+    clearDraft();
   }
 
   function enterEditModeUI(drill){
@@ -691,13 +772,15 @@
     renderEditBoard(); renderEditLedger();
   }
 
-  document.querySelectorAll('input[name=fSide]').forEach(r => r.addEventListener('change', renderEditBoard));
+  document.querySelectorAll('input[name=fSide]').forEach(r => r.addEventListener('change', () => { renderEditBoard(); saveDraft(); }));
+  $('fName').addEventListener('input', saveDraft);
 
   $('undoBtn').addEventListener('click', () => {
     if(editorMoves.length === 0) return;
     editChess.undo(); editorMoves.pop(); editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     $('editMsg').textContent = '';
+    saveDraft();
   });
   $('clearBtn').addEventListener('click', () => resetEditor(true));
 
@@ -714,6 +797,7 @@
     msg.textContent = 'Saved "'+name+'" — '+drill.moves.length+' ply. Undo back to any point and play a different reply to branch off it.';
     msg.className = 'form-msg ok';
     renderLibraryTab();
+    clearDraft();
   });
 
   $('saveChangesBtn').addEventListener('click', () => {
@@ -755,6 +839,7 @@
     editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     msg.textContent = 'Loaded '+parsed.moves.length+' ply onto the board.'; msg.className = 'form-msg ok';
+    saveDraft();
   });
 
   // ============================================================
@@ -787,9 +872,11 @@
   async function init(){
     await loadDb();
     renderLibraryTab();
+    restoreDraft();
     renderEditBoard();
     renderEditLedger();
-    if(db.drills.length) setStatus('Shuffle a line to begin.', 'info');
+    const resumed = restoreSession();
+    if(!resumed && db.drills.length) setStatus('Shuffle a line to begin.', 'info');
   }
   init();
 })();
