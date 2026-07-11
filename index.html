@@ -76,6 +76,7 @@
   .coord{position:absolute;font-family:'JetBrains Mono',monospace;font-size:9px;opacity:.55;}
   .coord.file{bottom:2px;right:3px;}
   .coord.rank{top:2px;left:3px;}
+  .check-count{position:absolute;top:2px;right:3px;min-width:14px;height:14px;line-height:14px;padding:0 2px;border-radius:50%;background:var(--brass);color:#1a1208;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;text-align:center;}
 
   .status{margin-top:14px;min-height:24px;font-size:14px;}
   .status.ok{color:var(--felt);}
@@ -346,7 +347,16 @@
         div.dataset.square = sqName;
         if(ci === 0){ const rl=document.createElement('span'); rl.className='coord rank'; rl.textContent=8-r; div.appendChild(rl); }
         if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
-        if(cell){ const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p); }
+        if(cell){
+          const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p);
+          if(cell.type === 'k' && currentDrill){
+            const checksOnThisKing = checksGiven[cell.color === 'w' ? 'b' : 'w'] || 0;
+            if(checksOnThisKing > 0){
+              const cc = document.createElement('span'); cc.className = 'check-count'; cc.textContent = checksOnThisKing;
+              div.appendChild(cc);
+            }
+          }
+        }
         if(selectedSquare === sqName) div.classList.add('selected');
         if(hintSquare === sqName) div.classList.add('hint');
         const target = legalTargets.find(t => t.to === sqName);
