@@ -121,6 +121,15 @@
   .edit-banner button{padding:4px 10px;font-size:12px;}
   #editBoardOuter{max-width:380px;margin:0 auto 10px;}
   summary{color:var(--muted);font-size:12.5px;cursor:pointer;}
+
+  /* Focus mode */
+  body:fullscreen, html:fullscreen{background:var(--bg);}
+  .wrap.focus-mode{max-width:640px;padding-top:6vh;}
+  .wrap.focus-mode header.top{display:none;}
+  .wrap.focus-mode .layout{grid-template-columns:1fr;}
+  .wrap.focus-mode .panel-card{display:none;}
+  .wrap.focus-mode .board-card{padding:28px;}
+  #focusBtn.active{border-color:var(--brass);color:var(--brass);}
 </style>
 </head>
 <body>
@@ -137,13 +146,19 @@
     <div class="board-card">
       <div class="board-header">
         <div class="drill-name" id="drillName">No line loaded</div>
-        <div class="side-badge" id="sideBadge">—</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="side-badge" id="checksBadge" title="Three-check tally">Checks —</div>
+          <div class="side-badge" id="sideBadge">—</div>
+          <button class="ghost" id="focusBtn" type="button">Focus mode</button>
+        </div>
       </div>
       <div class="board-outer"><div class="board" id="board"></div></div>
       <div class="status info" id="status">Add a line in the library, then shuffle a drill to begin.</div>
       <div class="board-actions">
         <button class="primary" id="shuffleBtn">Shuffle a line</button>
+        <button class="primary" id="nextBtn" style="display:none;">Next drill →</button>
         <button class="ghost" id="hintBtn" disabled>Reveal move</button>
+        <button class="ghost" id="goBackBtn" style="display:none;">Go back</button>
         <button class="ghost" id="restartBtn" disabled>Restart line</button>
       </div>
     </div>
@@ -264,6 +279,7 @@
   // ============================================================
   // PRACTICE
   // ============================================================
+  const CHECKS_TO_WIN = 3;
   let chess = new Chess();
   let currentDrill = null;
   let moveIndex = 0;
@@ -271,15 +287,23 @@
   let legalTargets = [];
   let wrongAttempts = 0;
   let practiceFilter = 'all';
+  let awaitingGoBack = false;
+  let drillFinished = false;
+  let checksGiven = { w: 0, b: 0 };
 
   const boardEl = $('board');
   const statusEl = $('status');
   const ledgerEl = $('ledger');
   const drillNameEl = $('drillName');
   const sideBadgeEl = $('sideBadge');
+  const checksBadgeEl = $('checksBadge');
   const shuffleBtn = $('shuffleBtn');
+  const nextBtn = $('nextBtn');
   const hintBtn = $('hintBtn');
+  const goBackBtn = $('goBackBtn');
   const restartBtn = $('restartBtn');
+  const focusBtn = $('focusBtn');
+  const wrapEl = document.querySelector('.wrap');
 
   function currentOrientationIsBlack(){ return currentDrill && currentDrill.userColor === 'b'; }
 
@@ -319,6 +343,7 @@
 
   function renderLedger(){
     if(!currentDrill){ ledgerEl.innerHTML = '<div class="empty" style="border:none;">Nothing played yet</div>'; return; }
+    if(!drillFinished){ ledgerEl.innerHTML = '<div class="empty" style="border:none;">Scoresheet hidden while drilling — finish the line to reveal it.</div>'; return; }
     ledgerEl.innerHTML = '';
     const moves = currentDrill.moves;
     for(let i=0;i<moves.length;i+=2){
@@ -339,6 +364,18 @@
 
   function eligibleDrills(){ return practiceFilter === 'all' ? db.drills : db.drills.filter(d => d.userColor === practiceFilter); }
 
+  function registerCheck(color){ checksGiven[color] = (checksGiven[color] || 0) + 1; }
+
+  function renderChecksBadge(){
+    if(!currentDrill){ checksBadgeEl.textContent = 'Checks —'; return; }
+    const you = checksGiven[currentDrill.userColor] || 0;
+    const opp = checksGiven[currentDrill.userColor === 'w' ? 'b' : 'w'] || 0;
+    checksBadgeEl.textContent = 'Checks — you ' + you + '/' + CHECKS_TO_WIN + ' · opp ' + opp + '/' + CHECKS_TO_WIN;
+  }
+
+  function updateGoBackVisibility(){ goBackBtn.style.display = awaitingGoBack ? 'inline-block' : 'none'; }
+  function updateNextVisibility(){ nextBtn.style.display = drillFinished ? 'inline-block' : 'none'; }
+
   function shuffleDrill(){
     const pool = eligibleDrills();
     if(pool.length === 0){ setStatus('No lines match that filter yet. Add one in the library.', 'info'); return; }
@@ -351,10 +388,12 @@
     currentDrill = drill;
     chess.reset();
     moveIndex = 0; selectedSquare = null; legalTargets = []; wrongAttempts = 0;
+    awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 };
     drillNameEl.textContent = drill.name;
     sideBadgeEl.textContent = 'Playing ' + (drill.userColor === 'w' ? 'White' : 'Black');
     hintBtn.disabled = false; restartBtn.disabled = false;
     setStatus('Your move.', 'info');
+    updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
     renderLedger(); renderBoard();
     maybeAdvanceOpponent();
   }
@@ -362,19 +401,25 @@
   function maybeAdvanceOpponent(){
     if(!currentDrill) return;
     while(currentDrill && moveIndex < currentDrill.moves.length && chess.turn() !== currentDrill.userColor){
+      const mover = chess.turn();
       chess.move(currentDrill.moves[moveIndex], { sloppy: true });
       moveIndex++;
+      if(chess.in_check()) registerCheck(mover);
     }
-    renderLedger(); renderBoard();
-    if(currentDrill && moveIndex >= currentDrill.moves.length){ completeDrill(); }
-    else if(currentDrill){ setStatus('Your move.', 'info'); }
+    if(!currentDrill) return;
+    renderChecksBadge(); renderLedger(); renderBoard();
+    if(moveIndex >= currentDrill.moves.length){ completeDrill(false); }
+    else{ setStatus('Your move.', 'info'); }
   }
 
-  function completeDrill(){
+  function completeDrill(viaThreeCheck){
+    drillFinished = true;
     currentDrill.completed = (currentDrill.completed || 0) + 1;
     saveDb();
-    setStatus('Line complete — that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '. Shuffle for another.', 'ok');
-    renderLibraryTab();
+    const lead = viaThreeCheck ? 'Three-check win — ' : 'Line complete — ';
+    setStatus(lead + 'that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '. Press Next for another.', 'ok');
+    updateNextVisibility(); updateGoBackVisibility();
+    renderLedger(); renderLibraryTab();
   }
 
   function onSquareClick(sqName){
@@ -395,22 +440,42 @@
   }
 
   function attemptMove(from, to){
+    if(awaitingGoBack) return;
     const result = chess.move({ from, to, promotion: 'q' });
     if(!result) return;
     const expected = currentDrill.moves[moveIndex];
     if(stripSym(result.san) !== stripSym(expected)){
-      chess.undo();
       selectedSquare = null; legalTargets = []; wrongAttempts++;
-      setStatus(wrongAttempts >= 2 ? ('Not the line. The move is ' + expected + '.') : 'Not the line — try again.', 'err');
-      renderBoard();
+      awaitingGoBack = true;
+      setStatus('Wrong move — go back.', 'err');
+      updateGoBackVisibility();
+      renderLedger(); renderBoard();
       return;
     }
     selectedSquare = null; legalTargets = []; wrongAttempts = 0;
     moveIndex++;
+    if(chess.in_check()) registerCheck(currentDrill.userColor);
+    renderChecksBadge();
+    if(checksGiven[currentDrill.userColor] >= CHECKS_TO_WIN){
+      setStatus('Correct.', 'ok');
+      renderLedger(); renderBoard();
+      setTimeout(() => completeDrill(true), 250);
+      return;
+    }
     setStatus('Correct.', 'ok');
     renderLedger(); renderBoard();
-    if(moveIndex >= currentDrill.moves.length){ setTimeout(completeDrill, 250); }
+    if(moveIndex >= currentDrill.moves.length){ setTimeout(() => completeDrill(false), 250); }
     else{ setTimeout(maybeAdvanceOpponent, 350); }
+  }
+
+  function goBack(){
+    if(!awaitingGoBack) return;
+    chess.undo();
+    awaitingGoBack = false;
+    selectedSquare = null; legalTargets = [];
+    setStatus('Your move.', 'info');
+    updateGoBackVisibility();
+    renderLedger(); renderBoard();
   }
 
   hintBtn.addEventListener('click', () => {
@@ -418,7 +483,9 @@
     setStatus('The move is ' + currentDrill.moves[moveIndex] + '.', 'info');
   });
   restartBtn.addEventListener('click', () => { if(currentDrill) startDrill(currentDrill); });
+  goBackBtn.addEventListener('click', goBack);
   shuffleBtn.addEventListener('click', shuffleDrill);
+  nextBtn.addEventListener('click', shuffleDrill);
   $('colorFilter').addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-filter]');
     if(!btn) return;
@@ -471,6 +538,8 @@
           currentDrill = null; drillNameEl.textContent='No line loaded'; sideBadgeEl.textContent='—';
           ledgerEl.innerHTML='<div class="empty" style="border:none;">Nothing played yet</div>'; boardEl.innerHTML='';
           hintBtn.disabled=true; restartBtn.disabled=true; setStatus('Line deleted.', 'info');
+          awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 };
+          updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
         }
         if(editingId === drill.id){ resetEditor(true); }
         saveDb();
@@ -662,6 +731,30 @@
     editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     msg.textContent = 'Loaded '+parsed.moves.length+' ply onto the board.'; msg.className = 'form-msg ok';
+  });
+
+  // ============================================================
+  // FOCUS MODE
+  // ============================================================
+  function setFocusMode(on){
+    wrapEl.classList.toggle('focus-mode', on);
+    focusBtn.classList.toggle('active', on);
+    focusBtn.textContent = on ? 'Exit focus mode' : 'Focus mode';
+  }
+
+  focusBtn.addEventListener('click', async () => {
+    const turningOn = !wrapEl.classList.contains('focus-mode');
+    if(turningOn){
+      setFocusMode(true);
+      try{ await document.documentElement.requestFullscreen(); }catch(e){ /* fullscreen unavailable; CSS focus mode still applies */ }
+    }else{
+      setFocusMode(false);
+      if(document.fullscreenElement){ try{ await document.exitFullscreen(); }catch(e){} }
+    }
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    if(!document.fullscreenElement && wrapEl.classList.contains('focus-mode')){ setFocusMode(false); }
   });
 
   // ============================================================
