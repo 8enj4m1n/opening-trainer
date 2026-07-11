@@ -7,6 +7,23 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script
+  src="https://js.sentry-cdn.com/143b77dc19bc4992a088b0285ccedbaa.min.js"
+  crossorigin="anonymous"
+></script>
+<script>
+  Sentry.onLoad(function () {
+    Sentry.init({
+      environment: (location.protocol === 'file:' || location.hostname === 'localhost') ? 'local' : 'production',
+      ignoreErrors: [
+        'ResizeObserver loop limit exceeded',
+        'ResizeObserver loop completed with undelivered notifications',
+        'Non-Error promise rejection captured',
+        'Script error.'
+      ]
+    });
+  });
+</script>
 <style>
   :root{
     --bg:#171310;
