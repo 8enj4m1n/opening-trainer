@@ -1042,8 +1042,9 @@
     }
     engineBusy = { key: pos.key, fen: pos.fen, ucis: pos.ucis, turn: pos.turn, startDepth: cached ? cached.depth : 0 };
     engine.postMessage(pos.ucis.length ? 'position startpos moves ' + pos.ucis.join(' ') : 'position startpos');
-    // user-requested deepening gets much longer bursts so it can actually push past hard depths
-    engine.postMessage('go movetime ' + (engineTargets[pos.key] ? 20000 : 5000) + ' depth ' + targetOf(pos.key));
+    // search runs until the depth target is reached — 22 by default, +4 per Depth +4 press
+    // (the movetime is only a safety cap so a pathological position can't spin forever)
+    engine.postMessage('go movetime 60000 depth ' + targetOf(pos.key));
     renderEngineInfo();
   }
 
