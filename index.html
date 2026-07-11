@@ -49,6 +49,7 @@
   .sq.dark{background:var(--board-dark);}
   .sq.selectable{cursor:pointer;}
   .sq.selected{outline:3px solid var(--brass);outline-offset:-3px;}
+  .sq.hint{box-shadow:inset 0 0 0 4px var(--felt);}
   .sq .dot{width:22%;height:22%;border-radius:50%;background:rgba(79,106,82,.75);}
   .sq .ring{position:absolute;inset:6%;border-radius:50%;border:4px solid rgba(79,106,82,.8);}
   .sq.selectable:focus-visible{outline:3px solid var(--brass);outline-offset:-3px;}
@@ -157,7 +158,7 @@
       <div class="board-actions">
         <button class="primary" id="shuffleBtn">Shuffle a line</button>
         <button class="primary" id="nextBtn" style="display:none;">Next drill →</button>
-        <button class="ghost" id="hintBtn" disabled>Reveal move</button>
+        <button class="ghost" id="hintBtn" disabled>Hint</button>
         <button class="ghost" id="goBackBtn" style="display:none;">Go back</button>
         <button class="ghost" id="restartBtn" disabled>Restart line</button>
       </div>
@@ -290,6 +291,8 @@
   let awaitingGoBack = false;
   let drillFinished = false;
   let checksGiven = { w: 0, b: 0 };
+  let hintStage = 0;      // 0 = nothing shown yet this move, 1 = piece highlighted, 2 = move revealed
+  let hintSquare = null;  // square of the piece to move, while hintStage >= 1
 
   const boardEl = $('board');
   const statusEl = $('status');
@@ -325,6 +328,7 @@
         if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
         if(cell){ const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p); }
         if(selectedSquare === sqName) div.classList.add('selected');
+        if(hintSquare === sqName) div.classList.add('hint');
         const target = legalTargets.find(t => t.to === sqName);
         if(target){ const marker=document.createElement('span'); marker.className = cell ? 'ring' : 'dot'; div.appendChild(marker); }
         const isUsersTurn = currentDrill && chess.turn() === currentDrill.userColor && moveIndex < currentDrill.moves.length;
@@ -376,6 +380,13 @@
   function updateGoBackVisibility(){ goBackBtn.style.display = awaitingGoBack ? 'inline-block' : 'none'; }
   function updateNextVisibility(){ nextBtn.style.display = drillFinished ? 'inline-block' : 'none'; }
 
+  function expectedMoveVerbose(){
+    if(!currentDrill || moveIndex >= currentDrill.moves.length) return null;
+    const expected = currentDrill.moves[moveIndex];
+    return chess.moves({ verbose: true }).find(m => stripSym(m.san) === stripSym(expected)) || null;
+  }
+  function resetHint(){ hintStage = 0; hintSquare = null; hintBtn.textContent = 'Hint'; }
+
   function shuffleDrill(){
     const pool = eligibleDrills();
     if(pool.length === 0){ setStatus('No lines match that filter yet. Add one in the library.', 'info'); return; }
@@ -389,6 +400,7 @@
     chess.reset();
     moveIndex = 0; selectedSquare = null; legalTargets = []; wrongAttempts = 0;
     awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 };
+    resetHint();
     drillNameEl.textContent = drill.name;
     sideBadgeEl.textContent = 'Playing ' + (drill.userColor === 'w' ? 'White' : 'Black');
     hintBtn.disabled = false; restartBtn.disabled = false;
@@ -409,7 +421,7 @@
     if(!currentDrill) return;
     renderChecksBadge(); renderLedger(); renderBoard();
     if(moveIndex >= currentDrill.moves.length){ completeDrill(false); }
-    else{ setStatus('Your move.', 'info'); }
+    else{ resetHint(); setStatus('Your move.', 'info'); }
   }
 
   function completeDrill(viaThreeCheck){
@@ -473,6 +485,7 @@
     chess.undo();
     awaitingGoBack = false;
     selectedSquare = null; legalTargets = [];
+    resetHint();
     setStatus('Your move.', 'info');
     updateGoBackVisibility();
     renderLedger(); renderBoard();
@@ -480,7 +493,18 @@
 
   hintBtn.addEventListener('click', () => {
     if(!currentDrill || moveIndex >= currentDrill.moves.length) return;
-    setStatus('The move is ' + currentDrill.moves[moveIndex] + '.', 'info');
+    const expected = currentDrill.moves[moveIndex];
+    if(hintStage === 0){
+      const vm = expectedMoveVerbose();
+      hintSquare = vm ? vm.from : null;
+      hintStage = 1;
+      hintBtn.textContent = 'Reveal move';
+      setStatus(hintSquare ? 'That piece has the move.' : 'Hint unavailable.', 'info');
+      renderBoard();
+    }else{
+      hintStage = 2;
+      setStatus('The move is ' + expected + '.', 'info');
+    }
   });
   restartBtn.addEventListener('click', () => { if(currentDrill) startDrill(currentDrill); });
   goBackBtn.addEventListener('click', goBack);
