@@ -4,9 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ledger — Opening Repertoire Trainer</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<script src="coi-serviceworker.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" crossorigin="anonymous">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js" crossorigin="anonymous"></script>
 <script
   src="https://js.sentry-cdn.com/143b77dc19bc4992a088b0285ccedbaa.min.js"
   crossorigin="anonymous"
@@ -226,7 +227,9 @@
         <div class="board-actions" style="justify-content:center;">
           <button class="ghost" id="undoBtn">Undo last move</button>
           <button class="ghost" id="clearBtn">Clear / start new</button>
+          <button class="ghost" id="engineBtn" type="button">Engine: off</button>
         </div>
+        <div class="hint" id="engineInfo" style="text-align:center;min-height:16px;margin-top:6px;"></div>
 
         <div style="font-size:12.5px;color:var(--muted);margin:16px 0 8px;">Moves so far</div>
         <div class="ledger" id="editLedger"><div class="empty" style="border:none;">No moves yet — click a piece to begin.</div></div>
@@ -621,7 +624,7 @@
       tab.classList.add('active');
       ['practice','library','add'].forEach(name => { $('tab-'+name).style.display = (name === tab.dataset.tab) ? 'block' : 'none'; });
       if(tab.dataset.tab === 'library') renderLibraryTab();
-      if(tab.dataset.tab === 'add'){ renderEditBoard(); renderEditLedger(); }
+      if(tab.dataset.tab === 'add'){ if(engineOn) loadEngine(); renderEditBoard(); renderEditLedger(); }
     });
   });
 
@@ -738,6 +741,7 @@
       });
     });
     $('editTurnHint').textContent = (editChess.turn() === 'w' ? 'White' : 'Black') + ' to move';
+    analyzeEditPosition();
   }
 
   function renderEditLedger(){
@@ -881,6 +885,158 @@
     renderEditBoard(); renderEditLedger();
     msg.textContent = 'Loaded '+parsed.moves.length+' ply onto the board.'; msg.className = 'form-msg ok';
     saveDraft();
+  });
+
+  // ============================================================
+  // ENGINE (Fairy-Stockfish WASM, three-check)
+  // ============================================================
+  const ENGINE_CACHE_KEY = 'repertoire-engine-cache';
+  const ENGINE_ON_KEY = 'repertoire-engine-on';
+  const ENGINE_TARGET_DEPTH = 22;
+  const engineBtn = $('engineBtn');
+  const engineInfoEl = $('engineInfo');
+  let engine = null;
+  let engineStatus = 'off'; // 'loading' | 'ready' | 'failed'
+  let engineOn = false;
+  let engineBusy = null;    // { key, fen, ucis, turn } of the search in flight
+  let engineCache = {};
+  try{ engineCache = JSON.parse(localStorage.getItem(ENGINE_CACHE_KEY) || '{}') || {}; }catch(e){ engineCache = {}; }
+  try{ engineOn = localStorage.getItem(ENGINE_ON_KEY) === '1'; }catch(e){}
+  if(engineOn) engineBtn.textContent = 'Engine: on';
+
+  function saveEngineCache(){
+    try{ localStorage.setItem(ENGINE_CACHE_KEY, JSON.stringify(engineCache)); }catch(e){}
+  }
+
+  // Cache key includes the three-check tally: the same diagram with different
+  // check counts is a different position to the engine.
+  function editEnginePos(){
+    const t = new Chess();
+    const ucis = [];
+    const checks = { w: 0, b: 0 };
+    for(const san of editorMoves){
+      const mover = t.turn();
+      const mv = t.move(san, { sloppy: true });
+      if(!mv) break;
+      ucis.push(mv.from + mv.to + (mv.promotion || ''));
+      if(t.in_check()) checks[mover]++;
+    }
+    return { key: t.fen() + '|' + checks.w + '+' + checks.b, fen: t.fen(), ucis: ucis, turn: t.turn() };
+  }
+
+  function pvMoveToSan(fen, uci){
+    try{
+      const t = new Chess(fen);
+      const mv = t.move({ from: uci.slice(0,2), to: uci.slice(2,4), promotion: uci.length > 4 ? uci[4] : undefined });
+      return mv ? mv.san : uci;
+    }catch(e){ return uci; }
+  }
+
+  function fmtScore(kind, val, turn){
+    const v = turn === 'w' ? val : -val; // engine scores are from the side to move; show from White's side
+    if(kind === 'mate') return (v > 0 ? '+#' : '-#') + Math.abs(v);
+    return (v >= 0 ? '+' : '') + (v / 100).toFixed(2);
+  }
+
+  function renderEngineInfo(){
+    const pos = editEnginePos();
+    const c = engineCache[pos.key];
+    let txt = c ? 'Best: ' + c.san + ' · depth ' + c.depth + (c.score ? ' · ' + c.score : '') : '';
+    if(engineOn){
+      if(engineStatus === 'loading') txt = txt || 'Loading engine (one-time ~1.6 MB)…';
+      else if(engineStatus === 'failed') txt = 'Engine unavailable — try fully reloading the page.';
+      else if(engineBusy && engineBusy.key === pos.key) txt += (txt ? ' · ' : '') + 'analysing…';
+    }
+    engineInfoEl.textContent = txt;
+  }
+
+  function onEngineLine(line){
+    if(line === 'readyok' && engineStatus === 'loading'){
+      engineStatus = 'ready';
+      engine.postMessage('ucinewgame');
+      analyzeEditPosition();
+      return;
+    }
+    if(!engineBusy) return;
+    if(line.indexOf('bestmove') === 0){
+      const finished = engineBusy; engineBusy = null;
+      const mv = line.split(' ')[1];
+      if(mv === '(none)'){ engineCache[finished.key] = { san: '—', depth: ENGINE_TARGET_DEPTH, score: 'game over' }; }
+      saveEngineCache();
+      const pos = editEnginePos();
+      if(engineOn && engineStatus === 'ready' && pos.key !== finished.key) analyzeEditPosition();
+      else renderEngineInfo();
+      return;
+    }
+    if(line.indexOf('info ') === 0){
+      const mpv = line.match(/\bmultipv (\d+)/);
+      if(mpv && mpv[1] !== '1') return;
+      const d = line.match(/\bdepth (\d+)/);
+      const sc = line.match(/\bscore (cp|mate) (-?\d+)/);
+      const pv = line.match(/\bpv ([a-h][1-8][a-h][1-8][qrbn]?)/);
+      if(!d || !pv) return;
+      const depth = parseInt(d[1], 10);
+      const cur = engineCache[engineBusy.key];
+      if(cur && cur.depth >= depth) return;
+      engineCache[engineBusy.key] = {
+        san: pvMoveToSan(engineBusy.fen, pv[1]),
+        depth: depth,
+        score: sc ? fmtScore(sc[1], parseInt(sc[2], 10), engineBusy.turn) : ''
+      };
+      renderEngineInfo();
+    }
+  }
+
+  function loadEngine(){
+    if(engine || engineStatus === 'loading' || engineStatus === 'failed') return;
+    if(!window.crossOriginIsolated){
+      engineStatus = 'failed';
+      renderEngineInfo();
+      return;
+    }
+    engineStatus = 'loading';
+    renderEngineInfo();
+    const s = document.createElement('script');
+    s.src = 'engine/stockfish.js';
+    s.onload = () => {
+      Stockfish().then(sf => {
+        engine = sf;
+        engine.addMessageListener(onEngineLine);
+        engine.postMessage('uci');
+        engine.postMessage('setoption name UCI_Variant value 3check');
+        engine.postMessage('setoption name Threads value ' + Math.min(4, navigator.hardwareConcurrency || 1));
+        engine.postMessage('isready');
+      }).catch(() => { engineStatus = 'failed'; renderEngineInfo(); });
+    };
+    s.onerror = () => { engineStatus = 'failed'; renderEngineInfo(); };
+    document.head.appendChild(s);
+  }
+
+  function analyzeEditPosition(){
+    renderEngineInfo();
+    if(!engineOn || engineStatus !== 'ready') return;
+    const pos = editEnginePos();
+    const cached = engineCache[pos.key];
+    if(cached && cached.depth >= ENGINE_TARGET_DEPTH) return;
+    if(engineBusy){
+      if(engineBusy.key !== pos.key) engine.postMessage('stop');
+      return;
+    }
+    engineBusy = pos;
+    engine.postMessage(pos.ucis.length ? 'position startpos moves ' + pos.ucis.join(' ') : 'position startpos');
+    engine.postMessage('go movetime 5000 depth ' + ENGINE_TARGET_DEPTH);
+    renderEngineInfo();
+  }
+
+  engineBtn.addEventListener('click', () => {
+    engineOn = !engineOn;
+    try{ localStorage.setItem(ENGINE_ON_KEY, engineOn ? '1' : ''); }catch(e){}
+    engineBtn.textContent = 'Engine: ' + (engineOn ? 'on' : 'off');
+    if(engineOn){ loadEngine(); analyzeEditPosition(); }
+    else{
+      if(engine && engineBusy) engine.postMessage('stop');
+      renderEngineInfo();
+    }
   });
 
   // ============================================================
