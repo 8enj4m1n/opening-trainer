@@ -266,13 +266,13 @@
 
   async function loadDb(){
     try{
-      const res = await window.storage.get(STORAGE_KEY, false);
-      if(res && res.value){ db = JSON.parse(res.value); }
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if(raw){ db = JSON.parse(raw); }
     }catch(e){ db = { drills: [] }; }
     if(!db.drills) db.drills = [];
   }
   async function saveDb(){
-    try{ await window.storage.set(STORAGE_KEY, JSON.stringify(db), false); }
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
     catch(e){ console.error('Storage error', e); }
   }
 
