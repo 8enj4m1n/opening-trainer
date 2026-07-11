@@ -228,7 +228,7 @@
           <button class="ghost" id="undoBtn">Undo last move</button>
           <button class="ghost" id="clearBtn">Clear / start new</button>
           <button class="ghost" id="engineBtn" type="button">Engine: off</button>
-          <button class="ghost" id="deepenBtn" type="button">Deeper</button>
+          <button class="ghost" id="deepenBtn" type="button">Depth +4</button>
         </div>
         <div class="hint" id="engineInfo" style="text-align:center;min-height:16px;margin-top:6px;"></div>
 
@@ -976,7 +976,10 @@
       if(mv === '(none)'){ engineCache[finished.key] = { san: '—', depth: 99, score: '', done: true }; }
       const cur = engineCache[finished.key];
       // a full (unstopped) search that gained no depth won't gain any next time either
-      if(cur && !finished.stopped && cur.depth <= finished.startDepth) cur.done = true;
+      if(cur && !finished.stopped && cur.depth <= finished.startDepth){
+        if(engineTargets[finished.key] > cur.depth) engineTargets[finished.key] = 0; // drop the extra target quietly; Deeper can retry
+        else cur.done = true;
+      }
       saveEngineCache();
       renderEngineInfo();
       if(engineOn && engineStatus === 'ready'){ analyzeEditPosition(); maybePrescan(); }
@@ -997,6 +1000,7 @@
         depth: depth,
         score: sc ? fmtScore(sc[1], parseInt(sc[2], 10), engineBusy.turn) : ''
       };
+      saveEngineCache(); // persist each new depth immediately, not just at search end
       renderEngineInfo();
     }
   }
@@ -1038,7 +1042,8 @@
     }
     engineBusy = { key: pos.key, fen: pos.fen, ucis: pos.ucis, turn: pos.turn, startDepth: cached ? cached.depth : 0 };
     engine.postMessage(pos.ucis.length ? 'position startpos moves ' + pos.ucis.join(' ') : 'position startpos');
-    engine.postMessage('go movetime 5000 depth ' + targetOf(pos.key));
+    // user-requested deepening gets much longer bursts so it can actually push past hard depths
+    engine.postMessage('go movetime ' + (engineTargets[pos.key] ? 20000 : 5000) + ' depth ' + targetOf(pos.key));
     renderEngineInfo();
   }
 
