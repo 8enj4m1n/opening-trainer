@@ -62,7 +62,6 @@
   .side-badge{font-family:'JetBrains Mono',monospace;font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:3px 8px;border-radius:20px;border:1px solid var(--line);color:var(--muted);}
   .board-outer{width:100%;aspect-ratio:1/1;border:2px solid var(--line);border-radius:4px;overflow:hidden;}
   .board{display:grid;grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);width:100%;height:100%;}
-  .board.reviewing{filter:grayscale(.35) brightness(.85);}
   .sq{position:relative;display:flex;align-items:center;justify-content:center;cursor:default;user-select:none;}
   .sq.light{background:var(--board-light);}
   .sq.dark{background:var(--board-dark);}
@@ -201,6 +200,10 @@
           <button data-filter="w">Playing White</button>
           <button data-filter="b">Playing Black</button>
         </div>
+        <div class="field" style="margin-bottom:14px;">
+          <label for="folderFilter">Opening</label>
+          <select id="folderFilter"><option value="all">All openings</option></select>
+        </div>
         <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">Scoresheet</div>
         <div class="ledger" id="ledger"><div class="empty" style="border:none;">Nothing played yet</div></div>
       </div>
@@ -221,6 +224,13 @@
           <div class="radio-row">
             <label><input type="radio" name="fSide" value="w" checked> White</label>
             <label><input type="radio" name="fSide" value="b"> Black</label>
+          </div>
+        </div>
+        <div class="field">
+          <label for="fFolder">Folder (opening)</label>
+          <div style="display:flex;gap:8px;">
+            <select id="fFolder" style="flex:1;"><option value="">Uncategorized</option></select>
+            <button class="ghost" id="newFolderBtn" type="button">+ New folder</button>
           </div>
         </div>
 
@@ -268,7 +278,7 @@
     b:{p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'}
   };
 
-  let db = { drills: [] };
+  let db = { drills: [], folders: [] };
   const $ = (id) => document.getElementById(id);
 
   function stripSym(san){ return san.replace(/[+#]/g,''); }
@@ -298,8 +308,17 @@
     try{
       const raw = localStorage.getItem(STORAGE_KEY);
       if(raw){ db = JSON.parse(raw); }
-    }catch(e){ db = { drills: [] }; }
+    }catch(e){ db = { drills: [], folders: [] }; }
     if(!db.drills) db.drills = [];
+    if(!db.folders) db.folders = [];
+  }
+
+  // Union of explicitly-created folders and any folder names already used on a drill
+  // (so nothing is ever lost even if a drill references a folder that was renamed away).
+  function allFolders(){
+    const set = new Set(db.folders);
+    db.drills.forEach(d => { if(d.folder) set.add(d.folder); });
+    return [...set].sort((a,b) => a.localeCompare(b));
   }
   async function saveDb(){
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
@@ -318,6 +337,7 @@
   let legalTargets = [];
   let wrongAttempts = 0;
   let practiceFilter = 'all';
+  let practiceFolder = 'all';
   let awaitingGoBack = false;
   let reviewOffset = 0; // 0 = live position; >0 = viewing that many plies back (never past moveIndex, so it can't reveal unplayed moves)
   let drillFinished = false;
@@ -443,7 +463,12 @@
     }
   }
 
-  function eligibleDrills(){ return practiceFilter === 'all' ? db.drills : db.drills.filter(d => d.userColor === practiceFilter); }
+  function eligibleDrills(){
+    return db.drills.filter(d =>
+      (practiceFilter === 'all' || d.userColor === practiceFilter) &&
+      (practiceFolder === 'all' || (d.folder || '') === practiceFolder)
+    );
+  }
 
   function renderProgressNote(){
     if(challengeQueue !== null){
@@ -708,6 +733,40 @@
   });
 
   // ============================================================
+  // FOLDERS (opening groups — for filtering practice/challenge and labelling drills)
+  // ============================================================
+  const folderFilterEl = $('folderFilter');
+  const fFolderEl = $('fFolder');
+
+  function populateFolderSelects(){
+    const folders = allFolders();
+    const options = folders.map(f => '<option value="'+escapeHtml(f)+'">'+escapeHtml(f)+'</option>').join('');
+    const prevFilter = folderFilterEl.value || 'all';
+    folderFilterEl.innerHTML = '<option value="all">All openings</option>' + options;
+    folderFilterEl.value = folders.includes(prevFilter) || prevFilter === 'all' ? prevFilter : 'all';
+    practiceFolder = folderFilterEl.value;
+
+    const prevEdit = fFolderEl.value || '';
+    fFolderEl.innerHTML = '<option value="">Uncategorized</option>' + options;
+    fFolderEl.value = folders.includes(prevEdit) ? prevEdit : '';
+  }
+
+  folderFilterEl.addEventListener('change', () => {
+    practiceFolder = folderFilterEl.value;
+    renderProgressNote();
+  });
+
+  $('newFolderBtn').addEventListener('click', () => {
+    const name = (prompt('Name this folder (opening):') || '').trim();
+    if(!name) return;
+    if(!db.folders.includes(name)) db.folders.push(name);
+    saveDb();
+    populateFolderSelects();
+    fFolderEl.value = name;
+    saveDraft();
+  });
+
+  // ============================================================
   // TABS
   // ============================================================
   document.querySelectorAll('.tab').forEach(tab => {
@@ -734,7 +793,7 @@
       const item = document.createElement('div'); item.className = 'drill-item';
       const left = document.createElement('div');
       left.innerHTML = '<div class="name">'+escapeHtml(drill.name)+'</div>'
-        + '<div class="meta">'+(drill.userColor==='w'?'White':'Black')+' · '+drill.moves.length+' ply · completed '+(drill.completed||0)+'×</div>';
+        + '<div class="meta">'+(drill.folder ? escapeHtml(drill.folder)+' · ' : '')+(drill.userColor==='w'?'White':'Black')+' · '+drill.moves.length+' ply · completed '+(drill.completed||0)+'×</div>';
       const actions = document.createElement('div'); actions.className = 'actions';
 
       const playBtn = document.createElement('button');
@@ -759,6 +818,8 @@
         if(editingId === drill.id){ resetEditor(true); }
         saveDb();
         renderLibraryTab();
+        populateFolderSelects();
+        renderProgressNote();
       });
 
       actions.appendChild(playBtn); actions.appendChild(editBtn); actions.appendChild(delBtn);
@@ -775,7 +836,6 @@
   let editSelected = null;
   let editLegalTargets = [];
   let editingId = null;
-  let editCursor = 0; // how many of editorMoves are shown; stays at editorMoves.length except while arrow-key reviewing
 
   function editSide(){ return document.querySelector('input[name=fSide]:checked').value; }
 
@@ -785,7 +845,7 @@
     if(editingId) return;
     const name = $('fName').value;
     if(editorMoves.length === 0 && !name.trim()){ clearDraft(); return; }
-    try{ localStorage.setItem(DRAFT_KEY, JSON.stringify({ editorMoves: editorMoves.slice(), fName: name, fSide: editSide() })); }
+    try{ localStorage.setItem(DRAFT_KEY, JSON.stringify({ editorMoves: editorMoves.slice(), fName: name, fSide: editSide(), fFolder: fFolderEl.value })); }
     catch(e){ console.error('Draft storage error', e); }
   }
   function clearDraft(){ try{ localStorage.removeItem(DRAFT_KEY); }catch(e){} }
@@ -796,25 +856,16 @@
     editChess.reset();
     for(const m of rec.editorMoves){ if(!editChess.move(m, { sloppy: true })) break; }
     editorMoves = rec.editorMoves.slice();
-    editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
+    editSelected = null; editLegalTargets = [];
     if(rec.fName) $('fName').value = rec.fName;
     if(rec.fSide === 'w' || rec.fSide === 'b'){ document.querySelector('input[name=fSide][value="'+rec.fSide+'"]').checked = true; }
+    if(rec.fFolder && allFolders().includes(rec.fFolder)) fFolderEl.value = rec.fFolder;
     $('editMsg').textContent = 'Restored your unsaved draft.';
     $('editMsg').className = 'form-msg ok';
   }
 
-  function editPositionAt(idx){
-    const t = new Chess();
-    for(let i = 0; i < idx && i < editorMoves.length; i++){
-      if(!t.move(editorMoves[i], { sloppy: true })) break;
-    }
-    return t;
-  }
-
   function renderEditBoard(){
-    const reviewing = editCursor < editorMoves.length;
-    const viewChess = reviewing ? editPositionAt(editCursor) : editChess;
-    const arr = viewChess.board();
+    const arr = editChess.board();
     const flip = editSide() === 'b';
     const rowOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
     const colOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
@@ -831,10 +882,10 @@
         if(ci === 0){ const rl=document.createElement('span'); rl.className='coord rank'; rl.textContent=8-r; div.appendChild(rl); }
         if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
         if(cell){ const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p); }
-        if(!reviewing && editSelected === sqName) div.classList.add('selected');
-        const target = reviewing ? null : editLegalTargets.find(t => t.to === sqName);
+        if(editSelected === sqName) div.classList.add('selected');
+        const target = editLegalTargets.find(t => t.to === sqName);
         if(target){ const marker=document.createElement('span'); marker.className = cell ? 'ring' : 'dot'; div.appendChild(marker); }
-        const clickable = !reviewing && ((cell && cell.color === viewChess.turn()) || target);
+        const clickable = (cell && cell.color === editChess.turn()) || target;
         if(clickable){
           div.classList.add('selectable'); div.tabIndex = 0;
           div.addEventListener('click', () => onEditSquareClick(sqName));
@@ -843,10 +894,7 @@
         container.appendChild(div);
       });
     });
-    container.classList.toggle('reviewing', reviewing);
-    $('editTurnHint').textContent = reviewing
-      ? ('Reviewing move ' + editCursor + ' of ' + editorMoves.length + ' — press → to return')
-      : (viewChess.turn() === 'w' ? 'White' : 'Black') + ' to move';
+    $('editTurnHint').textContent = (editChess.turn() === 'w' ? 'White' : 'Black') + ' to move';
     analyzeEditPosition();
   }
 
@@ -859,11 +907,7 @@
       const num = document.createElement('div'); num.className = 'num'; num.textContent = (i/2+1)+'.'; row.appendChild(num);
       [i, i+1].forEach(idx => {
         const mv = document.createElement('div'); mv.className = 'mv';
-        if(idx < editorMoves.length){
-          mv.textContent = editorMoves[idx];
-          if(idx < editCursor) mv.classList.add('done');
-          if(idx === editCursor) mv.classList.add('current');
-        }
+        if(idx < editorMoves.length) mv.textContent = editorMoves[idx];
         row.appendChild(mv);
       });
       el.appendChild(row);
@@ -886,15 +930,15 @@
     const result = editChess.move({ from: editSelected, to: sqName, promotion: 'q' });
     if(!result) return;
     editorMoves.push(result.san);
-    editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
+    editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     $('editMsg').textContent = '';
     saveDraft();
   }
 
   function resetEditor(clearFields){
-    editChess.reset(); editorMoves = []; editSelected = null; editLegalTargets = []; editingId = null; editCursor = 0;
-    if(clearFields){ $('fName').value = ''; document.querySelector('input[name=fSide][value="w"]').checked = true; }
+    editChess.reset(); editorMoves = []; editSelected = null; editLegalTargets = []; editingId = null;
+    if(clearFields){ $('fName').value = ''; document.querySelector('input[name=fSide][value="w"]').checked = true; fFolderEl.value = ''; }
     $('editBanner').style.display = 'none';
     $('saveChangesBtn').style.display = 'none';
     $('saveAsSeparateBtn').style.display = 'none';
@@ -919,10 +963,11 @@
     editChess.reset();
     drill.moves.forEach(m => editChess.move(m, { sloppy: true }));
     editorMoves = drill.moves.slice();
-    editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
+    editSelected = null; editLegalTargets = [];
     editingId = drill.id;
     $('fName').value = drill.name;
     document.querySelector('input[name=fSide][value="'+drill.userColor+'"]').checked = true;
+    fFolderEl.value = allFolders().includes(drill.folder) ? drill.folder : '';
     enterEditModeUI(drill);
     renderEditBoard(); renderEditLedger();
   }
@@ -930,13 +975,14 @@
   document.querySelectorAll('input[name=fSide]').forEach(r => r.addEventListener('change', () => { renderEditBoard(); saveDraft(); }));
   $('fName').addEventListener('input', saveDraft);
 
-  $('undoBtn').addEventListener('click', () => {
+  function undoEditMove(){
     if(editorMoves.length === 0) return;
-    editChess.undo(); editorMoves.pop(); editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
+    editChess.undo(); editorMoves.pop(); editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     $('editMsg').textContent = '';
     saveDraft();
-  });
+  }
+  $('undoBtn').addEventListener('click', undoEditMove);
   $('clearBtn').addEventListener('click', () => resetEditor(true));
 
   $('saveNewBtn').addEventListener('click', () => {
@@ -944,7 +990,7 @@
     const msg = $('editMsg');
     if(!name){ msg.textContent = 'Give the line a name.'; msg.className = 'form-msg err'; return; }
     if(editorMoves.length === 0){ msg.textContent = 'Play at least one move first.'; msg.className = 'form-msg err'; return; }
-    const drill = { id: 'd_'+Date.now()+'_'+Math.floor(Math.random()*10000), name, userColor: editSide(), moves: editorMoves.slice(), completed: 0, createdAt: Date.now() };
+    const drill = { id: 'd_'+Date.now()+'_'+Math.floor(Math.random()*10000), name, userColor: editSide(), folder: fFolderEl.value, moves: editorMoves.slice(), completed: 0, createdAt: Date.now() };
     db.drills.push(drill);
     saveDb();
     editingId = drill.id;
@@ -963,7 +1009,7 @@
     const msg = $('editMsg');
     if(!name){ msg.textContent = 'Give the line a name.'; msg.className = 'form-msg err'; return; }
     if(editorMoves.length === 0){ msg.textContent = 'A line needs at least one move.'; msg.className = 'form-msg err'; return; }
-    drill.name = name; drill.userColor = editSide(); drill.moves = editorMoves.slice();
+    drill.name = name; drill.userColor = editSide(); drill.folder = fFolderEl.value; drill.moves = editorMoves.slice();
     saveDb();
     enterEditModeUI(drill);
     msg.textContent = 'Changes saved.'; msg.className = 'form-msg ok';
@@ -975,7 +1021,7 @@
     const msg = $('editMsg');
     if(!name){ msg.textContent = 'Give the new line a name.'; msg.className = 'form-msg err'; return; }
     if(editorMoves.length === 0){ msg.textContent = 'Play at least one move first.'; msg.className = 'form-msg err'; return; }
-    const drill = { id: 'd_'+Date.now()+'_'+Math.floor(Math.random()*10000), name, userColor: editSide(), moves: editorMoves.slice(), completed: 0, createdAt: Date.now() };
+    const drill = { id: 'd_'+Date.now()+'_'+Math.floor(Math.random()*10000), name, userColor: editSide(), folder: fFolderEl.value, moves: editorMoves.slice(), completed: 0, createdAt: Date.now() };
     db.drills.push(drill);
     saveDb();
     msg.textContent = 'Saved as a new, separate line — the original is untouched.'; msg.className = 'form-msg ok';
@@ -991,7 +1037,7 @@
     editChess.reset();
     parsed.moves.forEach(m => editChess.move(m, { sloppy: true }));
     editorMoves = parsed.moves.slice();
-    editSelected = null; editLegalTargets = []; editCursor = editorMoves.length;
+    editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     msg.textContent = 'Loaded '+parsed.moves.length+' ply onto the board.'; msg.className = 'form-msg ok';
     saveDraft();
@@ -1029,7 +1075,7 @@
     const t = new Chess();
     const ucis = [];
     const checks = { w: 0, b: 0 };
-    for(let i = 0; i < editCursor && i < editorMoves.length; i++){
+    for(let i = 0; i < editorMoves.length; i++){
       const mover = t.turn();
       const mv = t.move(editorMoves[i], { sloppy: true });
       if(!mv) break;
@@ -1247,7 +1293,7 @@
   });
 
   // ============================================================
-  // ARROW-KEY MOVE NAVIGATION (practice review + editor scrubbing)
+  // ARROW-KEY MOVE NAVIGATION (practice review + editor undo)
   // ============================================================
   document.addEventListener('keydown', (e) => {
     if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -1265,11 +1311,9 @@
       renderBoard();
       if(reviewOffset === 0) refreshLiveStatus();
     } else if(tabName === 'add'){
-      if(editorMoves.length === 0) return;
+      if(e.key !== 'ArrowLeft') return; // no redo — same as the Undo last move button
       e.preventDefault();
-      if(e.key === 'ArrowLeft') editCursor = Math.max(0, editCursor - 1);
-      else editCursor = Math.min(editorMoves.length, editCursor + 1);
-      renderEditBoard(); renderEditLedger();
+      undoEditMove();
     }
   });
 
@@ -1300,6 +1344,7 @@
   async function init(){
     await loadDb();
     renderLibraryTab();
+    populateFolderSelects();
     restoreDraft();
     renderEditBoard();
     renderEditLedger();
