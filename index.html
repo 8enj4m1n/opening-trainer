@@ -144,6 +144,15 @@
   .filter-row button{padding:6px 12px;font-size:12.5px;}
   .filter-row button.active{background:var(--felt);border-color:var(--felt);color:#fff;}
 
+  /* Library folder groups (collapsible) */
+  .folder-group{border:1px solid var(--line);border-radius:8px;margin-bottom:10px;overflow:hidden;}
+  .folder-group summary{list-style:none;cursor:pointer;padding:12px 14px;font-family:'Fraunces',serif;font-weight:600;font-size:15px;color:var(--ink);background:var(--panel-2);display:flex;justify-content:space-between;align-items:center;}
+  .folder-group summary::-webkit-details-marker{display:none;}
+  .folder-group summary::after{content:'▸';color:var(--muted);font-size:13px;transition:transform .15s;}
+  .folder-group[open] summary::after{transform:rotate(90deg);}
+  .folder-group summary:hover{color:var(--brass);}
+  .folder-group .drill-list{padding:12px;}
+
   /* Edit-mode banner & editor board sizing */
   .edit-banner{background:rgba(201,154,74,.12);border:1px solid var(--brass);color:var(--brass);padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
   .edit-banner button{padding:4px 10px;font-size:12px;}
@@ -833,6 +842,47 @@
   // ============================================================
   // 6. LIBRARY — saved-drill list (practice / edit / delete)
   // ============================================================
+  // Builds one drill row (Practice / Edit / Delete) — shared by the folder groups and the ungrouped list below.
+  function buildDrillItem(drill){
+    const item = document.createElement('div'); item.className = 'drill-item';
+    const left = document.createElement('div');
+    left.innerHTML = '<div class="name">'+escapeHtml(drill.name)+'</div>'
+      + '<div class="meta">'+(drill.userColor==='w'?'White':'Black')+' · '+drill.moves.length+' ply · completed '+(drill.completed||0)+'×</div>';
+    const actions = document.createElement('div'); actions.className = 'actions';
+
+    const playBtn = document.createElement('button');
+    playBtn.textContent = 'Practice';
+    playBtn.addEventListener('click', () => { startDrill(drill); document.querySelector('.tab[data-tab="practice"]').click(); });
+
+    const editBtn = document.createElement('button');
+    editBtn.textContent = 'Edit';
+    editBtn.addEventListener('click', () => { loadDrillIntoEditor(drill); document.querySelector('.tab[data-tab="add"]').click(); });
+
+    const delBtn = document.createElement('button'); delBtn.className = 'danger'; delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', () => {
+      db.drills = db.drills.filter(d => d.id !== drill.id);
+      if(currentDrill && currentDrill.id === drill.id){
+        currentDrill = null; drillNameEl.textContent='No line loaded'; sideBadgeEl.textContent='—';
+        ledgerEl.innerHTML='<div class="empty" style="border:none;">Nothing played yet</div>'; boardEl.innerHTML='';
+        hintBtn.disabled=true; restartBtn.disabled=true; setStatus('Line deleted.', 'info');
+        awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 }; reviewOffset = 0;
+        updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
+        clearSession();
+      }
+      if(editingId === drill.id){ resetEditor(true); }
+      saveDb();
+      renderLibraryTab();
+      populateFolderSelects();
+      renderProgressNote();
+    });
+
+    actions.appendChild(playBtn); actions.appendChild(editBtn); actions.appendChild(delBtn);
+    item.appendChild(left); item.appendChild(actions);
+    return item;
+  }
+
+  // Groups drills by folder — each folder is a collapsible section you open to pick a line from;
+  // drills with no folder are listed plainly underneath, ungrouped.
   function renderLibraryTab(){
     const list = $('drillList');
     if(db.drills.length === 0){
@@ -840,43 +890,27 @@
       return;
     }
     list.innerHTML = '';
+
+    const grouped = {};
+    const ungrouped = [];
     db.drills.forEach(drill => {
-      const item = document.createElement('div'); item.className = 'drill-item';
-      const left = document.createElement('div');
-      left.innerHTML = '<div class="name">'+escapeHtml(drill.name)+'</div>'
-        + '<div class="meta">'+(drill.folder ? escapeHtml(drill.folder)+' · ' : '')+(drill.userColor==='w'?'White':'Black')+' · '+drill.moves.length+' ply · completed '+(drill.completed||0)+'×</div>';
-      const actions = document.createElement('div'); actions.className = 'actions';
-
-      const playBtn = document.createElement('button');
-      playBtn.textContent = 'Practice';
-      playBtn.addEventListener('click', () => { startDrill(drill); document.querySelector('.tab[data-tab="practice"]').click(); });
-
-      const editBtn = document.createElement('button');
-      editBtn.textContent = 'Edit';
-      editBtn.addEventListener('click', () => { loadDrillIntoEditor(drill); document.querySelector('.tab[data-tab="add"]').click(); });
-
-      const delBtn = document.createElement('button'); delBtn.className = 'danger'; delBtn.textContent = 'Delete';
-      delBtn.addEventListener('click', () => {
-        db.drills = db.drills.filter(d => d.id !== drill.id);
-        if(currentDrill && currentDrill.id === drill.id){
-          currentDrill = null; drillNameEl.textContent='No line loaded'; sideBadgeEl.textContent='—';
-          ledgerEl.innerHTML='<div class="empty" style="border:none;">Nothing played yet</div>'; boardEl.innerHTML='';
-          hintBtn.disabled=true; restartBtn.disabled=true; setStatus('Line deleted.', 'info');
-          awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 }; reviewOffset = 0;
-          updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
-          clearSession();
-        }
-        if(editingId === drill.id){ resetEditor(true); }
-        saveDb();
-        renderLibraryTab();
-        populateFolderSelects();
-        renderProgressNote();
-      });
-
-      actions.appendChild(playBtn); actions.appendChild(editBtn); actions.appendChild(delBtn);
-      item.appendChild(left); item.appendChild(actions);
-      list.appendChild(item);
+      if(drill.folder) (grouped[drill.folder] = grouped[drill.folder] || []).push(drill);
+      else ungrouped.push(drill);
     });
+
+    Object.keys(grouped).sort((a,b) => a.localeCompare(b)).forEach(folderName => {
+      const drills = grouped[folderName];
+      const details = document.createElement('details'); details.className = 'folder-group';
+      const summary = document.createElement('summary');
+      summary.textContent = folderName + ' (' + drills.length + ')';
+      details.appendChild(summary);
+      const innerList = document.createElement('div'); innerList.className = 'drill-list';
+      drills.forEach(drill => innerList.appendChild(buildDrillItem(drill)));
+      details.appendChild(innerList);
+      list.appendChild(details);
+    });
+
+    ungrouped.forEach(drill => list.appendChild(buildDrillItem(drill)));
   }
 
   // ============================================================
