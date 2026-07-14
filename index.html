@@ -53,6 +53,7 @@
   header.top h1{font-family:'Fraunces',serif;font-weight:700;font-size:clamp(28px,4vw,42px);margin:0;letter-spacing:-0.01em;}
   header.top .eyebrow{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--brass);margin:0 0 6px;}
   header.top p.tag{margin:6px 0 0;color:var(--muted);font-size:14.5px;max-width:460px;}
+  .mode-btn{margin-bottom:10px;padding:5px 10px;font-size:12px;}
 
   .layout{display:grid;grid-template-columns:minmax(320px,560px) 1fr;gap:28px;align-items:start;}
   @media (max-width:880px){ .layout{grid-template-columns:1fr;} }
@@ -177,6 +178,7 @@
 <div class="wrap">
   <header class="top">
     <div>
+      <button class="ghost mode-btn" id="modeBtn" type="button">Mode: Three-check</button>
       <p class="eyebrow">Repertoire drills</p>
       <h1>The Ledger</h1>
       <p class="tag">Play a line out on the board to save it. Rewind and try a different reply whenever you want a second line from the same position.</p>
@@ -312,9 +314,10 @@
   // ============================================================
   // 1. CONSTANTS & UTILITIES
   // ============================================================
-  const STORAGE_KEY = 'repertoire-data';    // saved drills + folders
-  const SESSION_KEY = 'repertoire-session'; // in-progress practice position
-  const DRAFT_KEY = 'repertoire-draft';     // unsaved editor line
+  const STORAGE_KEY = 'repertoire-data';       // saved drills + folders
+  const SESSION_KEY = 'repertoire-session';    // in-progress practice position
+  const DRAFT_KEY = 'repertoire-draft';        // unsaved editor line
+  const GAME_MODE_KEY = 'repertoire-game-mode'; // 'three-check' | 'standard'
   const FILES = ['a','b','c','d','e','f','g','h'];
   const PIECE_GLYPH = {
     w:{p:'♙',n:'♘',b:'♗',r:'♖',q:'♕',k:'♔'},
@@ -383,6 +386,8 @@
 
   // ---- State ----
   const CHECKS_TO_WIN = 3;
+  let gameMode = 'three-check'; // 'three-check' | 'standard' — toggled via #modeBtn
+  try{ gameMode = localStorage.getItem(GAME_MODE_KEY) || 'three-check'; }catch(e){}
   let chess = new Chess();
   let currentDrill = null;
   let moveIndex = 0;
@@ -408,6 +413,7 @@
   const drillNameEl = $('drillName');
   const sideBadgeEl = $('sideBadge');
   const checksBadgeEl = $('checksBadge');
+  const modeBtn = $('modeBtn');
   const progressNoteEl = $('progressNote');
   const shuffleBtn = $('shuffleBtn');
   const testAllBtn = $('testAllBtn');
@@ -456,7 +462,7 @@
         if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
         if(cell){
           const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p);
-          if(cell.type === 'k' && currentDrill){
+          if(gameMode === 'three-check' && cell.type === 'k' && currentDrill){
             const checksOnThisKing = checksForBadge[cell.color === 'w' ? 'b' : 'w'] || 0;
             const remaining = Math.max(0, CHECKS_TO_WIN - checksOnThisKing);
             const cc = document.createElement('span'); cc.className = 'check-count'; cc.textContent = remaining;
@@ -488,7 +494,7 @@
   function refreshLiveStatus(){
     if(!currentDrill) return;
     if(drillFinished){
-      const viaThreeCheck = checksGiven[currentDrill.userColor] >= CHECKS_TO_WIN;
+      const viaThreeCheck = gameMode === 'three-check' && checksGiven[currentDrill.userColor] >= CHECKS_TO_WIN;
       const lead = viaThreeCheck ? 'Three-check win — ' : 'Line complete — ';
       setStatus(lead + 'that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '. Press Next for another.', 'ok');
     } else if(awaitingGoBack){
@@ -556,6 +562,23 @@
     checksBadgeEl.textContent = 'Checks — you ' + you + '/' + CHECKS_TO_WIN + ' · opp ' + opp + '/' + CHECKS_TO_WIN;
   }
 
+  // Syncs everything that depends on which chess variant is active. Three-check-only UI
+  // (checks badge, king overlay, engine analysis — engine stays 3check-only for now) is
+  // hidden in standard mode rather than adapted, since the engine isn't variant-aware yet.
+  function applyGameMode(){
+    modeBtn.textContent = 'Mode: ' + (gameMode === 'three-check' ? 'Three-check' : 'Standard chess');
+    checksBadgeEl.style.display = gameMode === 'three-check' ? '' : 'none';
+    engineBtn.style.display = gameMode === 'three-check' ? '' : 'none';
+    deepenBtn.style.display = gameMode === 'three-check' ? '' : 'none';
+    engineInfoEl.style.display = gameMode === 'three-check' ? '' : 'none';
+    if(currentDrill) renderBoard();
+  }
+  modeBtn.addEventListener('click', () => {
+    gameMode = gameMode === 'three-check' ? 'standard' : 'three-check';
+    try{ localStorage.setItem(GAME_MODE_KEY, gameMode); }catch(e){}
+    applyGameMode();
+  });
+
   function updateGoBackVisibility(){ goBackBtn.style.display = awaitingGoBack ? 'inline-block' : 'none'; }
   function updateNextVisibility(){ nextBtn.style.display = drillFinished ? 'inline-block' : 'none'; }
 
@@ -592,7 +615,7 @@
       if(chess.in_check()) registerCheck(mover);
     }
 
-    const viaThreeCheck = checksGiven[drill.userColor] >= CHECKS_TO_WIN;
+    const viaThreeCheck = gameMode === 'three-check' && checksGiven[drill.userColor] >= CHECKS_TO_WIN;
     drillFinished = viaThreeCheck || moveIndex >= drill.moves.length;
 
     drillNameEl.textContent = drill.name;
@@ -742,7 +765,7 @@
     moveIndex++;
     if(chess.in_check()) registerCheck(currentDrill.userColor);
     renderChecksBadge();
-    if(checksGiven[currentDrill.userColor] >= CHECKS_TO_WIN){
+    if(gameMode === 'three-check' && checksGiven[currentDrill.userColor] >= CHECKS_TO_WIN){
       setStatus('Correct.', 'ok');
       renderLedger(); renderBoard();
       setTimeout(() => completeDrill(true), 250);
@@ -1503,6 +1526,7 @@
     const resumed = restoreSession();
     if(!resumed && db.drills.length) setStatus('Shuffle lines to begin.', 'info');
     renderProgressNote();
+    applyGameMode();
   }
   init();
 })();
