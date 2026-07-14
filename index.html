@@ -291,7 +291,7 @@
   //   7. ADD / EDIT     — building lines on the editor board
   //   8. ENGINE         — Fairy-Stockfish WASM analysis + pre-scan
   //   9. FOCUS MODE     — fullscreen practice view
-  //  10. ARROW KEYS     — practice review + editor undo
+  //  10. ARROW KEYS     — practice review + editor undo/redo
   //  11. ERROR REPORTING (Sentry)
   //  12. INIT
   // ============================================================
@@ -884,6 +884,7 @@
   // ============================================================
   let editChess = new Chess();
   let editorMoves = [];
+  let editRedoStack = []; // moves undone via Undo/← that → (redo) can restore, in undo order
   let editSelected = null;
   let editLegalTargets = [];
   let editingId = null;
@@ -907,6 +908,7 @@
     editChess.reset();
     for(const m of rec.editorMoves){ if(!editChess.move(m, { sloppy: true })) break; }
     editorMoves = rec.editorMoves.slice();
+    editRedoStack = [];
     editSelected = null; editLegalTargets = [];
     if(rec.fName) $('fName').value = rec.fName;
     if(rec.fSide === 'w' || rec.fSide === 'b'){ document.querySelector('input[name=fSide][value="'+rec.fSide+'"]').checked = true; }
@@ -981,6 +983,7 @@
     const result = editChess.move({ from: editSelected, to: sqName, promotion: 'q' });
     if(!result) return;
     editorMoves.push(result.san);
+    editRedoStack = []; // a genuinely new move invalidates whatever was undone before it
     editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     $('editMsg').textContent = '';
@@ -988,7 +991,7 @@
   }
 
   function resetEditor(clearFields){
-    editChess.reset(); editorMoves = []; editSelected = null; editLegalTargets = []; editingId = null;
+    editChess.reset(); editorMoves = []; editRedoStack = []; editSelected = null; editLegalTargets = []; editingId = null;
     if(clearFields){ $('fName').value = ''; document.querySelector('input[name=fSide][value="w"]').checked = true; fFolderEl.value = ''; }
     $('editBanner').style.display = 'none';
     $('saveChangesBtn').style.display = 'none';
@@ -1014,6 +1017,7 @@
     editChess.reset();
     drill.moves.forEach(m => editChess.move(m, { sloppy: true }));
     editorMoves = drill.moves.slice();
+    editRedoStack = [];
     editSelected = null; editLegalTargets = [];
     editingId = drill.id;
     $('fName').value = drill.name;
@@ -1028,7 +1032,19 @@
 
   function undoEditMove(){
     if(editorMoves.length === 0) return;
-    editChess.undo(); editorMoves.pop(); editSelected = null; editLegalTargets = [];
+    editChess.undo();
+    editRedoStack.push(editorMoves.pop());
+    editSelected = null; editLegalTargets = [];
+    renderEditBoard(); renderEditLedger();
+    $('editMsg').textContent = '';
+    saveDraft();
+  }
+  function redoEditMove(){
+    if(editRedoStack.length === 0) return;
+    const san = editRedoStack.pop();
+    if(!editChess.move(san, { sloppy: true })){ editRedoStack.push(san); return; }
+    editorMoves.push(san);
+    editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     $('editMsg').textContent = '';
     saveDraft();
@@ -1088,6 +1104,7 @@
     editChess.reset();
     parsed.moves.forEach(m => editChess.move(m, { sloppy: true }));
     editorMoves = parsed.moves.slice();
+    editRedoStack = [];
     editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
     msg.textContent = 'Loaded '+parsed.moves.length+' ply onto the board.'; msg.className = 'form-msg ok';
@@ -1349,7 +1366,7 @@
   });
 
   // ============================================================
-  // 10. ARROW KEYS — practice review (←/→) + editor undo (←)
+  // 10. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
   // ============================================================
   document.addEventListener('keydown', (e) => {
     if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -1367,9 +1384,10 @@
       renderBoard();
       if(reviewOffset === 0) refreshLiveStatus();
     } else if(tabName === 'add'){
-      if(e.key !== 'ArrowLeft') return; // no redo — same as the Undo last move button
       e.preventDefault();
-      undoEditMove();
+      // Left = same as the Undo last move button; Right = redo the move that undid.
+      if(e.key === 'ArrowLeft') undoEditMove();
+      else redoEditMove();
     }
   });
 
