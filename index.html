@@ -135,7 +135,8 @@
 
   /* Library drill list & filters */
   .drill-list{display:flex;flex-direction:column;gap:10px;}
-  .drill-item{border:1px solid var(--line);border-radius:8px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;}
+  .drill-item{border:1px solid var(--line);border-radius:8px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;cursor:grab;}
+  .drill-item.dragging{opacity:.4;}
   .drill-item .name{font-family:'Fraunces',serif;font-weight:600;font-size:15.5px;}
   .drill-item .meta{color:var(--muted);font-size:12px;font-family:'JetBrains Mono',monospace;margin-top:3px;}
   .drill-item .actions{display:flex;gap:6px;flex-shrink:0;}
@@ -152,6 +153,9 @@
   .folder-group[open] summary::after{transform:rotate(90deg);}
   .folder-group summary:hover{color:var(--brass);}
   .folder-group .drill-list{padding:12px;}
+  .folder-group.drag-over{outline:2px dashed var(--brass);outline-offset:-2px;}
+  .ungrouped-drop{display:flex;flex-direction:column;gap:10px;min-height:12px;border-radius:8px;}
+  .ungrouped-drop.drag-over{outline:2px dashed var(--brass);outline-offset:4px;}
 
   /* Edit-mode banner & editor board sizing */
   .edit-banner{background:rgba(201,154,74,.12);border:1px solid var(--brass);color:var(--brass);padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
@@ -843,8 +847,27 @@
   // 6. LIBRARY — saved-drill list (practice / edit / delete)
   // ============================================================
   // Builds one drill row (Practice / Edit / Delete) — shared by the folder groups and the ungrouped list below.
+  // Reassigns a drill to a folder (pass '' to remove it from any folder) and refreshes everything
+  // that depends on folder membership.
+  function moveDrillToFolder(id, folderName){
+    const drill = db.drills.find(d => d.id === id);
+    if(!drill || (drill.folder || '') === folderName) return;
+    drill.folder = folderName;
+    saveDb();
+    renderLibraryTab();
+    populateFolderSelects();
+    renderProgressNote();
+  }
+
   function buildDrillItem(drill){
     const item = document.createElement('div'); item.className = 'drill-item';
+    item.draggable = true;
+    item.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', drill.id);
+      e.dataTransfer.effectAllowed = 'move';
+      item.classList.add('dragging');
+    });
+    item.addEventListener('dragend', () => item.classList.remove('dragging'));
     const left = document.createElement('div');
     left.innerHTML = '<div class="name">'+escapeHtml(drill.name)+'</div>'
       + '<div class="meta">'+(drill.userColor==='w'?'White':'Black')+' · '+drill.moves.length+' ply · completed '+(drill.completed||0)+'×</div>';
@@ -907,10 +930,31 @@
       const innerList = document.createElement('div'); innerList.className = 'drill-list';
       drills.forEach(drill => innerList.appendChild(buildDrillItem(drill)));
       details.appendChild(innerList);
+      // Drop anywhere in the folder (header or among its drills) to file a dragged line into it.
+      details.addEventListener('dragover', (e) => { e.preventDefault(); details.classList.add('drag-over'); });
+      details.addEventListener('dragleave', (e) => { if(!details.contains(e.relatedTarget)) details.classList.remove('drag-over'); });
+      details.addEventListener('drop', (e) => {
+        e.preventDefault();
+        details.classList.remove('drag-over');
+        moveDrillToFolder(e.dataTransfer.getData('text/plain'), folderName);
+      });
       list.appendChild(details);
     });
 
-    ungrouped.forEach(drill => list.appendChild(buildDrillItem(drill)));
+    const ungroupedWrap = document.createElement('div'); ungroupedWrap.className = 'ungrouped-drop';
+    if(ungrouped.length === 0 && Object.keys(grouped).length > 0){
+      ungroupedWrap.innerHTML = '<div class="empty" style="border-style:dashed;">Drag a drill here to remove it from its folder</div>';
+    }
+    ungrouped.forEach(drill => ungroupedWrap.appendChild(buildDrillItem(drill)));
+    // Drop here (or on empty space below the folders) to take a drill out of any folder.
+    ungroupedWrap.addEventListener('dragover', (e) => { e.preventDefault(); ungroupedWrap.classList.add('drag-over'); });
+    ungroupedWrap.addEventListener('dragleave', (e) => { if(!ungroupedWrap.contains(e.relatedTarget)) ungroupedWrap.classList.remove('drag-over'); });
+    ungroupedWrap.addEventListener('drop', (e) => {
+      e.preventDefault();
+      ungroupedWrap.classList.remove('drag-over');
+      moveDrillToFolder(e.dataTransfer.getData('text/plain'), '');
+    });
+    list.appendChild(ungroupedWrap);
   }
 
   // ============================================================
