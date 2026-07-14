@@ -26,6 +26,7 @@
   });
 </script>
 <style>
+  /* Theme & base */
   :root{
     --bg:#171310;
     --panel:#221c16;
@@ -47,6 +48,7 @@
   body{min-height:100vh;padding:28px 20px 60px;}
   .wrap{max-width:1180px;margin:0 auto;}
 
+  /* Page header & layout grid */
   header.top{margin-bottom:28px;border-bottom:1px solid var(--line);padding-bottom:20px;display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;}
   header.top h1{font-family:'Fraunces',serif;font-weight:700;font-size:clamp(28px,4vw,42px);margin:0;letter-spacing:-0.01em;}
   header.top .eyebrow{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--brass);margin:0 0 6px;}
@@ -55,7 +57,7 @@
   .layout{display:grid;grid-template-columns:minmax(320px,560px) 1fr;gap:28px;align-items:start;}
   @media (max-width:880px){ .layout{grid-template-columns:1fr;} }
 
-  /* Board */
+  /* Board card (practice + editor boards share .board / .sq / .piece) */
   .board-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px;}
   .board-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px;flex-wrap:wrap;}
   .board-header .drill-name{font-family:'Fraunces',serif;font-size:19px;font-weight:600;}
@@ -80,6 +82,7 @@
   .check-count{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;text-shadow:0 0 3px #000,0 0 3px #000,0 1px 2px #000;font-family:'JetBrains Mono',monospace;font-size:min(3.4vw,22px);font-weight:700;z-index:2;pointer-events:none;}
   .progress-note{font-size:12px;color:var(--muted);margin-top:8px;}
 
+  /* Status line under the board */
   .status{margin-top:14px;min-height:24px;font-size:14px;}
   .status.ok{color:var(--felt);}
   .status.err{color:var(--oxide);}
@@ -98,13 +101,14 @@
   button.danger:hover{border-color:var(--oxide);}
   button:disabled{opacity:.4;cursor:not-allowed;}
 
-  /* Right panel */
+  /* Right panel & tabs */
   .panel-card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px;}
   .tabs{display:flex;gap:4px;margin-bottom:18px;border-bottom:1px solid var(--line);}
   .tab{background:none;border:none;border-bottom:2px solid transparent;border-radius:0;padding:8px 4px;margin-right:18px;color:var(--muted);font-weight:500;}
   .tab.active{color:var(--ink);border-bottom-color:var(--brass);}
   .tab:hover{color:var(--ink);}
 
+  /* Scoresheet / move ledger */
   .ledger{font-family:'JetBrains Mono',monospace;font-size:14px;border:1px solid var(--line);border-radius:6px;overflow:hidden;}
   .ledger-row{display:grid;grid-template-columns:32px 1fr 1fr;border-bottom:1px solid var(--line);}
   .ledger-row:last-child{border-bottom:none;}
@@ -113,6 +117,7 @@
   .ledger-row .mv.current{background:rgba(201,154,74,.16);color:var(--brass);font-weight:700;}
   .ledger-row .mv.done{color:var(--muted);}
 
+  /* Form fields (Add/edit tab) */
   .field{margin-bottom:16px;}
   .field label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;font-weight:500;}
   .field input[type=text], .field textarea, .field select{
@@ -128,6 +133,7 @@
   .form-msg.ok{color:var(--felt);}
   .hint{font-size:12px;color:var(--muted);margin-top:4px;}
 
+  /* Library drill list & filters */
   .drill-list{display:flex;flex-direction:column;gap:10px;}
   .drill-item{border:1px solid var(--line);border-radius:8px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;}
   .drill-item .name{font-family:'Fraunces',serif;font-weight:600;font-size:15.5px;}
@@ -138,6 +144,7 @@
   .filter-row button{padding:6px 12px;font-size:12.5px;}
   .filter-row button.active{background:var(--felt);border-color:var(--felt);color:#fff;}
 
+  /* Edit-mode banner & editor board sizing */
   .edit-banner{background:rgba(201,154,74,.12);border:1px solid var(--brass);color:var(--brass);padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
   .edit-banner button{padding:4px 10px;font-size:12px;}
   #editBoardOuter{max-width:380px;margin:0 auto 10px;}
@@ -165,6 +172,7 @@
   </header>
 
   <div class="layout">
+    <!-- Left: practice board, status, and drill controls -->
     <div class="board-card">
       <div class="board-header">
         <div class="drill-name" id="drillName">No line loaded</div>
@@ -187,6 +195,7 @@
       <div class="progress-note" id="progressNote"></div>
     </div>
 
+    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit) -->
     <div class="panel-card">
       <div class="tabs">
         <button class="tab active" data-tab="practice">Practice</button>
@@ -269,22 +278,46 @@
 
 <script>
 (function(){
-  const STORAGE_KEY = 'repertoire-data';
-  const SESSION_KEY = 'repertoire-session';
-  const DRAFT_KEY = 'repertoire-draft';
+  // ============================================================
+  // THE LEDGER — opening repertoire trainer (three-check chess)
+  //
+  // Script layout:
+  //   1. CONSTANTS & UTILITIES
+  //   2. DATABASE       — drills + folders in localStorage
+  //   3. PRACTICE       — drilling saved lines on the main board
+  //   4. FOLDERS        — opening groups for filtering & labelling
+  //   5. TABS
+  //   6. LIBRARY        — saved-drill list (practice / edit / delete)
+  //   7. ADD / EDIT     — building lines on the editor board
+  //   8. ENGINE         — Fairy-Stockfish WASM analysis + pre-scan
+  //   9. FOCUS MODE     — fullscreen practice view
+  //  10. ARROW KEYS     — practice review + editor undo
+  //  11. ERROR REPORTING (Sentry)
+  //  12. INIT
+  // ============================================================
+
+  // ============================================================
+  // 1. CONSTANTS & UTILITIES
+  // ============================================================
+  const STORAGE_KEY = 'repertoire-data';    // saved drills + folders
+  const SESSION_KEY = 'repertoire-session'; // in-progress practice position
+  const DRAFT_KEY = 'repertoire-draft';     // unsaved editor line
   const FILES = ['a','b','c','d','e','f','g','h'];
   const PIECE_GLYPH = {
     w:{p:'♙',n:'♘',b:'♗',r:'♖',q:'♕',k:'♔'},
     b:{p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'}
   };
 
-  let db = { drills: [], folders: [] };
   const $ = (id) => document.getElementById(id);
 
+  // SAN comparison helper — ignores check/mate suffixes so "Qh5+" matches "Qh5".
   function stripSym(san){ return san.replace(/[+#]/g,''); }
+
   function escapeHtml(s){
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
+
+  // Parses pasted move text ("1. e4 c5 2. Nf3 ...") into a validated SAN list.
   function parseMoveList(text){
     const tokens = text.split(/\s+/).map(t=>t.trim()).filter(Boolean)
       .filter(t => !/^\d+\.(\.\.)?$/.test(t))
@@ -303,6 +336,11 @@
     if(sanMoves.length === 0) return { error: 'Enter at least one move.' };
     return { moves: sanMoves };
   }
+
+  // ============================================================
+  // 2. DATABASE — drills + folders persisted in localStorage
+  // ============================================================
+  let db = { drills: [], folders: [] };
 
   async function loadDb(){
     try{
@@ -327,8 +365,10 @@
   }
 
   // ============================================================
-  // PRACTICE
+  // 3. PRACTICE — drilling saved lines on the main board
   // ============================================================
+
+  // ---- State ----
   const CHECKS_TO_WIN = 3;
   let chess = new Chess();
   let currentDrill = null;
@@ -348,6 +388,7 @@
   let challengeTotal = 0;
   let challengeDone = 0;
 
+  // ---- DOM references ----
   const boardEl = $('board');
   const statusEl = $('status');
   const ledgerEl = $('ledger');
@@ -364,6 +405,7 @@
   const focusBtn = $('focusBtn');
   const wrapEl = document.querySelector('.wrap');
 
+  // ---- Board rendering ----
   function currentOrientationIsBlack(){ return currentDrill && currentDrill.userColor === 'b'; }
 
   // Replays the drill up to (but never past) `idx` plies already played, for review navigation.
@@ -426,6 +468,7 @@
     if(reviewing) setStatus('Reviewing move ' + viewedIdx + ' of ' + moveIndex + ' — press → to return.', 'info');
   }
 
+  // ---- Status line & scoresheet ----
   function setStatus(msg, kind){ statusEl.textContent = msg; statusEl.className = 'status ' + (kind || 'info'); }
 
   // Recomputes the real (non-review) status line, for when arrow-key review returns to the live position.
@@ -463,6 +506,7 @@
     }
   }
 
+  // ---- Filters & progress note ----
   function eligibleDrills(){
     return db.drills.filter(d =>
       (practiceFilter === 'all' || d.userColor === practiceFilter) &&
@@ -489,6 +533,7 @@
     return a;
   }
 
+  // ---- Three-check tally ----
   function registerCheck(color){ checksGiven[color] = (checksGiven[color] || 0) + 1; }
 
   function renderChecksBadge(){
@@ -501,6 +546,7 @@
   function updateGoBackVisibility(){ goBackBtn.style.display = awaitingGoBack ? 'inline-block' : 'none'; }
   function updateNextVisibility(){ nextBtn.style.display = drillFinished ? 'inline-block' : 'none'; }
 
+  // ---- Session persistence (resume after tab close) ----
   function saveSession(){
     if(!currentDrill){ clearSession(); return; }
     try{ localStorage.setItem(SESSION_KEY, JSON.stringify({ drillId: currentDrill.id, moveIndex })); }
@@ -551,6 +597,7 @@
     return true;
   }
 
+  // ---- Two-stage hint ----
   function expectedMoveVerbose(){
     if(!currentDrill || moveIndex >= currentDrill.moves.length) return null;
     const expected = currentDrill.moves[moveIndex];
@@ -558,6 +605,7 @@
   }
   function resetHint(){ hintStage = 0; hintSquare = null; hintBtn.textContent = 'Hint'; }
 
+  // ---- Drill selection (shuffle / challenge / next) ----
   function shuffleDrill(){
     challengeQueue = null; challengeTotal = 0; challengeDone = 0; // manual shuffle always exits a running challenge
     const pool = eligibleDrills();
@@ -600,6 +648,7 @@
     nextSequentialDrill();
   }
 
+  // ---- Drill lifecycle ----
   function startDrill(drill){
     currentDrill = drill;
     chess.reset();
@@ -645,6 +694,7 @@
     saveSession();
   }
 
+  // ---- Move input ----
   function onSquareClick(sqName){
     if(!currentDrill) return;
     if(selectedSquare === null){
@@ -703,6 +753,7 @@
     saveSession();
   }
 
+  // ---- Practice button wiring ----
   hintBtn.addEventListener('click', () => {
     if(!currentDrill || moveIndex >= currentDrill.moves.length) return;
     if(reviewOffset > 0){ reviewOffset = 0; renderBoard(); }
@@ -733,7 +784,7 @@
   });
 
   // ============================================================
-  // FOLDERS (opening groups — for filtering practice/challenge and labelling drills)
+  // 4. FOLDERS — opening groups for filtering practice/challenge and labelling drills
   // ============================================================
   const folderFilterEl = $('folderFilter');
   const fFolderEl = $('fFolder');
@@ -767,7 +818,7 @@
   });
 
   // ============================================================
-  // TABS
+  // 5. TABS
   // ============================================================
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -780,7 +831,7 @@
   });
 
   // ============================================================
-  // LIBRARY
+  // 6. LIBRARY — saved-drill list (practice / edit / delete)
   // ============================================================
   function renderLibraryTab(){
     const list = $('drillList');
@@ -829,7 +880,7 @@
   }
 
   // ============================================================
-  // ADD / EDIT — board-based entry with branching
+  // 7. ADD / EDIT — building lines on the editor board (with branching)
   // ============================================================
   let editChess = new Chess();
   let editorMoves = [];
@@ -1044,12 +1095,13 @@
   });
 
   // ============================================================
-  // ENGINE (Fairy-Stockfish WASM, three-check)
+  // 8. ENGINE — Fairy-Stockfish WASM (three-check) analysis + library pre-scan
   // ============================================================
-  const ENGINE_CACHE_KEY = 'repertoire-engine-cache';
-  const ENGINE_ON_KEY = 'repertoire-engine-on';
-  const ENGINE_TARGET_DEPTH = 22;
-  const ENGINE_PRESCAN_DEPTH = 12;
+  // ---- State ----
+  const ENGINE_CACHE_KEY = 'repertoire-engine-cache'; // per-position best move / depth / eval
+  const ENGINE_ON_KEY = 'repertoire-engine-on';       // remembered on/off toggle
+  const ENGINE_TARGET_DEPTH = 22;   // default depth every editor position is analysed to
+  const ENGINE_PRESCAN_DEPTH = 12;  // basic depth for the automatic library pre-scan
   const engineBtn = $('engineBtn');
   const deepenBtn = $('deepenBtn');
   const engineInfoEl = $('engineInfo');
@@ -1065,6 +1117,7 @@
   try{ engineOn = localStorage.getItem(ENGINE_ON_KEY) === '1'; }catch(e){}
   if(engineOn) engineBtn.textContent = 'Engine: on';
 
+  // ---- Position helpers & formatting ----
   function saveEngineCache(){
     try{ localStorage.setItem(ENGINE_CACHE_KEY, JSON.stringify(engineCache)); }catch(e){}
   }
@@ -1115,6 +1168,7 @@
     engineInfoEl.textContent = txt;
   }
 
+  // ---- UCI message handling ----
   function onEngineLine(line){
     if(line === 'readyok' && engineStatus === 'loading'){
       engineStatus = 'ready';
@@ -1159,6 +1213,7 @@
     }
   }
 
+  // ---- Loading & searching ----
   function loadEngine(){
     if(engine || engineStatus === 'loading' || engineStatus === 'failed') return;
     if(!window.crossOriginIsolated){
@@ -1243,6 +1298,7 @@
     renderEngineInfo();
   }
 
+  // ---- Engine button wiring ----
   engineBtn.addEventListener('click', () => {
     engineOn = !engineOn;
     try{ localStorage.setItem(ENGINE_ON_KEY, engineOn ? '1' : ''); }catch(e){}
@@ -1269,7 +1325,7 @@
   });
 
   // ============================================================
-  // FOCUS MODE
+  // 9. FOCUS MODE — fullscreen practice view
   // ============================================================
   function setFocusMode(on){
     wrapEl.classList.toggle('focus-mode', on);
@@ -1293,7 +1349,7 @@
   });
 
   // ============================================================
-  // ARROW-KEY MOVE NAVIGATION (practice review + editor undo)
+  // 10. ARROW KEYS — practice review (←/→) + editor undo (←)
   // ============================================================
   document.addEventListener('keydown', (e) => {
     if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -1318,7 +1374,7 @@
   });
 
   // ============================================================
-  // ERROR REPORTING
+  // 11. ERROR REPORTING — Sentry manual "Report an issue" button
   // ============================================================
   const reportBtn = $('reportBtn');
   reportBtn.addEventListener('click', () => {
@@ -1339,7 +1395,7 @@
   });
 
   // ============================================================
-  // INIT
+  // 12. INIT
   // ============================================================
   async function init(){
     await loadDb();
