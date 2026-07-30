@@ -562,16 +562,15 @@
     checksBadgeEl.textContent = 'Checks — you ' + you + '/' + CHECKS_TO_WIN + ' · opp ' + opp + '/' + CHECKS_TO_WIN;
   }
 
-  // Syncs everything that depends on which chess variant is active. Three-check-only UI
-  // (checks badge, king overlay, engine analysis — engine stays 3check-only for now) is
-  // hidden in standard mode rather than adapted, since the engine isn't variant-aware yet.
+  // Syncs everything that depends on which chess variant is active. The checks badge and
+  // king check-count overlay are three-check-only and get hidden in standard mode; the
+  // engine stays available in both modes and just gets re-pointed at the matching
+  // UCI_Variant (see switchEngineVariant() in the ENGINE section below).
   function applyGameMode(){
     modeBtn.textContent = 'Mode: ' + (gameMode === 'three-check' ? 'Three-check' : 'Standard chess');
     checksBadgeEl.style.display = gameMode === 'three-check' ? '' : 'none';
-    engineBtn.style.display = gameMode === 'three-check' ? '' : 'none';
-    deepenBtn.style.display = gameMode === 'three-check' ? '' : 'none';
-    engineInfoEl.style.display = gameMode === 'three-check' ? '' : 'none';
     if(currentDrill) renderBoard();
+    switchEngineVariant();
   }
   modeBtn.addEventListener('click', () => {
     gameMode = gameMode === 'three-check' ? 'standard' : 'three-check';
@@ -1213,7 +1212,7 @@
   });
 
   // ============================================================
-  // 8. ENGINE — Fairy-Stockfish WASM (three-check) analysis + library pre-scan
+  // 8. ENGINE — Fairy-Stockfish WASM analysis (three-check or standard, per game mode) + library pre-scan
   // ============================================================
   // ---- State ----
   const ENGINE_CACHE_KEY = 'repertoire-engine-cache'; // per-position best move / depth / eval
@@ -1240,8 +1239,10 @@
     try{ localStorage.setItem(ENGINE_CACHE_KEY, JSON.stringify(engineCache)); }catch(e){}
   }
 
-  // Cache key includes the three-check tally: the same diagram with different
-  // check counts is a different position to the engine.
+  // Cache key includes the three-check tally (the same diagram with different check
+  // counts is a different position to the engine) and the game mode, since the engine's
+  // UCI_Variant changes the evaluation for the same FEN — 3check and standard-chess
+  // analysis of one position are cached separately, never mixed.
   function editEnginePos(){
     const t = new Chess();
     const ucis = [];
@@ -1253,7 +1254,7 @@
       ucis.push(mv.from + mv.to + (mv.promotion || ''));
       if(t.in_check()) checks[mover]++;
     }
-    return { key: t.fen() + '|' + checks.w + '+' + checks.b, fen: t.fen(), ucis: ucis, turn: t.turn() };
+    return { key: t.fen() + '|' + checks.w + '+' + checks.b + '|' + gameMode, fen: t.fen(), ucis: ucis, turn: t.turn() };
   }
 
   function pvMoveToSan(fen, uci){
@@ -1332,6 +1333,8 @@
   }
 
   // ---- Loading & searching ----
+  function engineVariant(){ return gameMode === 'three-check' ? '3check' : 'chess'; }
+
   function loadEngine(){
     if(engine || engineStatus === 'loading' || engineStatus === 'failed') return;
     if(!window.crossOriginIsolated){
@@ -1348,13 +1351,31 @@
         engine = sf;
         engine.addMessageListener(onEngineLine);
         engine.postMessage('uci');
-        engine.postMessage('setoption name UCI_Variant value 3check');
+        engine.postMessage('setoption name UCI_Variant value ' + engineVariant());
         engine.postMessage('setoption name Threads value ' + Math.min(4, navigator.hardwareConcurrency || 1));
         engine.postMessage('isready');
       }).catch(() => { engineStatus = 'failed'; renderEngineInfo(); });
     };
     s.onerror = () => { engineStatus = 'failed'; renderEngineInfo(); };
     document.head.appendChild(s);
+  }
+
+  // Called on every game-mode toggle. If the engine isn't loaded yet, loadEngine() will
+  // just pick up the right variant whenever it does load — nothing to do here. If it's
+  // already running, stop whatever's in flight, re-point UCI_Variant at the new mode, and
+  // reuse the same 'readyok' handler that the initial load uses to resume analysis once
+  // the switch is confirmed. The stale search's eventual bestmove is ignored (engineBusy
+  // is cleared immediately), and the prescan queue is rebuilt so it re-targets positions
+  // under the new variant's (separately cached) keys.
+  function switchEngineVariant(){
+    if(!engine) return;
+    if(engineBusy){ engineBusy.stopped = true; engine.postMessage('stop'); engineBusy = null; }
+    enginePrescanDirty = true; prescanQueue = null;
+    engineStatus = 'loading';
+    renderEngineInfo();
+    engine.postMessage('setoption name UCI_Variant value ' + engineVariant());
+    engine.postMessage('ucinewgame');
+    engine.postMessage('isready');
   }
 
   function analyzeEditPosition(){
@@ -1382,7 +1403,7 @@
     db.drills.forEach(drill => {
       const t = new Chess(); const ucis = []; const checks = { w: 0, b: 0 };
       const push = () => {
-        const key = t.fen() + '|' + checks.w + '+' + checks.b;
+        const key = t.fen() + '|' + checks.w + '+' + checks.b + '|' + gameMode;
         if(seen[key]) return; seen[key] = true;
         const c = engineCache[key];
         if(c && (c.done || c.depth >= ENGINE_PRESCAN_DEPTH)) return;
