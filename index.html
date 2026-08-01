@@ -199,7 +199,7 @@
 
   <div class="layout">
     <!-- Left: practice board, status, and drill controls -->
-    <div class="board-card">
+    <div class="board-card" id="drillCard">
       <div class="board-header">
         <div class="drill-name" id="drillName">No line loaded</div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -221,7 +221,28 @@
       <div class="progress-note" id="progressNote"></div>
     </div>
 
-    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit) -->
+    <!-- Left (Puzzles tab): same shape as the drill card, swapped in by the tab switcher -->
+    <div class="board-card" id="puzzleCard" style="display:none;">
+      <div class="board-header">
+        <div class="drill-name" id="pzTitle">No puzzle loaded</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="side-badge" id="pzStepBadge">—</div>
+          <div class="side-badge" id="pzSideBadge">—</div>
+        </div>
+      </div>
+      <div class="board-outer"><div class="board" id="pzBoard"></div></div>
+      <div class="status info" id="pzStatus">Import some games in the Puzzles panel to begin.</div>
+      <div class="board-actions">
+        <button class="primary" id="pzNextBtn" type="button">Next puzzle →</button>
+        <button class="primary" id="pzShuffleBtn" type="button">Shuffle puzzles</button>
+        <button class="ghost" id="pzPrevBtn" type="button">← Prev</button>
+        <button class="ghost" id="pzRetryBtn" type="button">Retry</button>
+        <button class="ghost" id="pzSolutionBtn" type="button">Show solution</button>
+      </div>
+      <div class="progress-note" id="pzMeta"></div>
+    </div>
+
+    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit / Puzzles) -->
     <div class="panel-card">
       <div class="tabs">
         <button class="tab active" data-tab="practice">Practice</button>
@@ -325,12 +346,19 @@
         <div class="field">
           <label for="pzMax">How many games to analyse</label>
           <select id="pzMax">
-            <option value="3">3 games — quickest</option>
+            <option value="3">3 games</option>
             <option value="5" selected>5 games</option>
-            <option value="10">10 games — slow</option>
-            <option value="20">20 games — very slow</option>
+            <option value="10">10 games</option>
+            <option value="20">20 games</option>
           </select>
-          <p class="hint">Only games played within your rating band count. The engine runs in your browser, so more games means a longer wait.</p>
+        </div>
+        <div class="field">
+          <label for="pzCoverage">How much of each game</label>
+          <select id="pzCoverage">
+            <option value="skip" selected>Skip the opening — from move 4 on</option>
+            <option value="all">Every move in the game</option>
+          </select>
+          <p class="hint" id="pzEstimate"></p>
         </div>
 
         <div class="board-actions">
@@ -341,18 +369,6 @@
         <div id="pzProgressWrap" style="display:none;">
           <div class="pz-bar"><div class="pz-bar-fill" id="pzBarFill"></div></div>
           <div class="hint" id="pzProgressText"></div>
-        </div>
-
-        <div id="pzSolveWrap" style="display:none;margin-top:18px;">
-          <div class="hint" id="pzPrompt" style="text-align:center;margin-bottom:8px;"></div>
-          <div class="board-outer" id="pzBoardOuter"><div class="board" id="pzBoard"></div></div>
-          <div class="board-actions" style="justify-content:center;">
-            <button class="ghost" id="pzPrevBtn" type="button">← Prev</button>
-            <button class="ghost" id="pzSolutionBtn" type="button">Show solution</button>
-            <button class="ghost" id="pzNextBtn" type="button">Next →</button>
-          </div>
-          <div class="form-msg" id="pzFeedback" style="text-align:center;"></div>
-          <div class="hint" id="pzMeta" style="text-align:center;"></div>
         </div>
 
         <div style="display:flex;justify-content:space-between;align-items:center;margin:18px 0 8px;gap:8px;flex-wrap:wrap;">
@@ -937,7 +953,12 @@
       ['practice','library','add','puzzles'].forEach(name => { $('tab-'+name).style.display = (name === tab.dataset.tab) ? 'block' : 'none'; });
       if(tab.dataset.tab === 'library') renderLibraryTab();
       if(tab.dataset.tab === 'add'){ if(engineOn) loadEngine(); renderEditBoard(); renderEditLedger(); }
-      if(tab.dataset.tab === 'puzzles') renderPuzzleList();
+      // The Puzzles tab swaps the whole left-hand board card, so puzzles get the same
+      // big-board layout as drills instead of a cramped one inside the side panel.
+      const onPuzzles = tab.dataset.tab === 'puzzles';
+      $('drillCard').style.display = onPuzzles ? 'none' : 'block';
+      $('puzzleCard').style.display = onPuzzles ? 'block' : 'none';
+      if(onPuzzles){ renderPuzzleList(); renderPuzzleBoard(); }
     });
   });
 
@@ -1586,6 +1607,9 @@
   const PZ_UNIQUE_GAP = 40;      // best move must beat the runner-up by this much
   const PZ_DECIDED = 1000;       // skip positions already completely won/lost
   const PZ_MATE_CP = 30000;      // sentinel so "mate in N" survives the arithmetic
+  const PZ_LINE_PLIES = 7;       // longest solution line kept (always ends on your move)
+  const PZ_SECS_PER_POS = 0.7;   // rough per-position cost, refined live once a scan starts
+  const PZ_TYPICAL_PLIES = 80;   // assumed game length before we've actually fetched any
 
   let puzzles = [];
   try{ puzzles = JSON.parse(localStorage.getItem(PUZZLES_KEY) || '[]') || []; }catch(e){ puzzles = []; }
@@ -1600,11 +1624,35 @@
   let pzSel = null;
   let pzTargets = [];
   let pzSolved = false;
+  let pzStep = 0;         // how far into the solution line you are (even = your turn)
+  let pzScanStart = 0;    // timestamp, for the live time estimate
 
   const pzMsgEl = $('pzMsg'), pzBarFill = $('pzBarFill'), pzProgressWrap = $('pzProgressWrap'),
         pzProgressText = $('pzProgressText'), pzFindBtn = $('pzFindBtn'), pzCancelBtn = $('pzCancelBtn'),
-        pzSolveWrap = $('pzSolveWrap'), pzPromptEl = $('pzPrompt'), pzFeedbackEl = $('pzFeedback'),
-        pzMetaEl = $('pzMeta'), pzListEl = $('pzList');
+        pzMetaEl = $('pzMeta'), pzListEl = $('pzList'), pzStatusEl = $('pzStatus'),
+        pzTitleEl = $('pzTitle'), pzSideBadgeEl = $('pzSideBadge'), pzStepBadgeEl = $('pzStepBadge');
+
+  function pzSetStatus(msg, kind){ pzStatusEl.textContent = msg; pzStatusEl.className = 'status ' + (kind || 'info'); }
+
+  function pzFmtDuration(secs){
+    if(secs < 60) return 'under a minute';
+    const mins = Math.round(secs / 60);
+    if(mins < 60) return 'about ' + mins + ' minute' + (mins === 1 ? '' : 's');
+    const hrs = (mins / 60).toFixed(1);
+    return 'about ' + hrs + ' hours';
+  }
+
+  // Shown before a scan, so the cost of "every move" vs "skip the opening" is visible up front.
+  // Game lengths aren't known until we fetch, so this uses a typical-length assumption.
+  function pzUpdateEstimate(){
+    const games = parseInt($('pzMax').value, 10) || 0;
+    const perGame = $('pzCoverage').value === 'all'
+      ? PZ_TYPICAL_PLIES + 1
+      : Math.max(0, Math.min(PZ_TYPICAL_PLIES, PZ_MAX_PLY) - PZ_SKIP_OPENING + 1);
+    const positions = games * perGame;
+    $('pzEstimate').textContent = 'Roughly ' + positions + ' positions to analyse — ' +
+      pzFmtDuration(positions * PZ_SECS_PER_POS) + ' on a typical machine.';
+  }
 
   function savePuzzles(){ try{ localStorage.setItem(PUZZLES_KEY, JSON.stringify(puzzles)); }catch(e){} }
   function pzSetMsg(t, kind){ pzMsgEl.textContent = t; pzMsgEl.className = 'form-msg ' + (kind || ''); }
@@ -1723,7 +1771,7 @@
     const site = $('pzSite').value, user = $('pzUser').value.trim(), speed = $('pzSpeed').value;
     const cap = parseInt($('pzMax').value, 10);
     if(!user){ pzSetMsg('Enter your username first.', 'err'); return; }
-    try{ localStorage.setItem(PZ_FORM_KEY, JSON.stringify({ site: site, user: user, speed: speed, max: cap })); }catch(e){}
+    try{ localStorage.setItem(PZ_FORM_KEY, JSON.stringify({ site: site, user: user, speed: speed, max: cap, coverage: $('pzCoverage').value })); }catch(e){}
     pzFindBtn.disabled = true;
     pzSetMsg('Looking up your ' + speed + ' rating…', '');
     try{
@@ -1762,10 +1810,14 @@
       return;
     }
     pzJobs = []; pzEvals = []; pzJobIdx = 0; pzCancel = false;
+    pzScanStart = Date.now();
+    const everyMove = $('pzCoverage').value === 'all';
     pzGames.forEach((g, gi) => {
       pzEvals[gi] = {};
-      const last = Math.min(g.ucis.length, PZ_MAX_PLY);
-      for(let ply = PZ_SKIP_OPENING; ply <= last; ply++) pzJobs.push({ gi: gi, ply: ply });
+      const first = everyMove ? 0 : PZ_SKIP_OPENING;
+      const last = everyMove ? g.ucis.length : Math.min(g.ucis.length, PZ_MAX_PLY);
+      g.firstPly = first; g.lastPly = last;
+      for(let ply = first; ply <= last; ply++) pzJobs.push({ gi: gi, ply: ply });
     });
     scanActive = true; scanConfigured = false;
     pzCancelBtn.style.display = 'inline-block';
@@ -1787,8 +1839,13 @@
   function renderScanProgress(){
     const pct = pzJobs.length ? Math.round(pzJobIdx / pzJobs.length * 100) : 0;
     pzBarFill.style.width = pct + '%';
-    pzProgressText.textContent = 'Position ' + Math.min(pzJobIdx + 1, pzJobs.length) +
-      ' of ' + pzJobs.length + ' · ' + pct + '%';
+    let txt = 'Position ' + Math.min(pzJobIdx + 1, pzJobs.length) + ' of ' + pzJobs.length + ' · ' + pct + '%';
+    // Once a few positions are done, the real per-position speed beats any guess.
+    if(pzJobIdx >= 3){
+      const perPos = (Date.now() - pzScanStart) / 1000 / pzJobIdx;
+      txt += ' · ' + pzFmtDuration((pzJobs.length - pzJobIdx) * perPos) + ' left';
+    }
+    pzProgressText.textContent = txt;
   }
 
   function pumpScan(){
@@ -1822,10 +1879,15 @@
       const cp = pzScoreToCp(sc[1], parseInt(sc[2], 10));
       if(idx === 1){
         if(depth > engineBusy.bestDepth) engineBusy.cp2 = null; // runner-up is stale at a new depth
-        const pv = line.match(/\bpv ([a-h][1-8][a-h][1-8][qrbn]?)/);
+        // Keep the whole principal variation, not just the first move — that's what lets a
+        // puzzle carry on when the opponent has a strong forced reply.
+        const pvm = line.match(/\bpv (.+)$/);
         engineBusy.bestDepth = depth;
         engineBusy.cp = cp;
-        if(pv) engineBusy.pv = pv[1];
+        if(pvm){
+          const seq = pvm[1].trim().split(/\s+/).filter(t => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(t));
+          if(seq.length){ engineBusy.pv = seq[0]; engineBusy.pvLine = seq; }
+        }
       }else if(idx === 2){
         engineBusy.cp2 = cp;
       }
@@ -1837,6 +1899,7 @@
         pzEvals[j.gi][j.ply] = {
           cp: j.turn === 'w' ? j.cp : -j.cp,  // normalise to White-relative straight away
           pv: j.pv,
+          pvLine: j.pvLine || null,
           gap: j.cp2 === null ? null : (j.cp - j.cp2)
         };
       }
@@ -1873,8 +1936,9 @@
     puzzles.forEach(p => { seen[p.fen] = true; });
     pzGames.forEach((g, gi) => {
       const ev = pzEvals[gi] || {};
-      const last = Math.min(g.ucis.length, PZ_MAX_PLY);
-      for(let ply = PZ_SKIP_OPENING; ply < last; ply++){
+      const first = g.firstPly === undefined ? PZ_SKIP_OPENING : g.firstPly;
+      const last = g.lastPly === undefined ? Math.min(g.ucis.length, PZ_MAX_PLY) : g.lastPly;
+      for(let ply = first; ply < last; ply++){
         const mover = ply % 2 === 0 ? 'w' : 'b';
         if(mover !== g.userColor) continue;
         const a = ev[ply], b = ev[ply + 1];
@@ -1891,12 +1955,25 @@
         if(!ok) continue;
         const fen = t.fen();
         if(seen[fen]) continue;
-        const solution = pvMoveToSan(fen, a.pv);
-        if(!solution || solution === a.pv) continue;   // couldn't turn the engine move into real notation
+        // Walk the engine's principal variation into real notation. The puzzle keeps going
+        // for as long as this line does, so a strong forced reply becomes the next question
+        // rather than ending the puzzle after one move.
+        const lineChess = new Chess(fen);
+        const lineSans = [];
+        for(const uci of (a.pvLine || [a.pv]).slice(0, PZ_LINE_PLIES)){
+          const mv = lineChess.move({ from: uci.slice(0,2), to: uci.slice(2,4),
+                                      promotion: uci.length > 4 ? uci[4] : undefined });
+          if(!mv) break;
+          lineSans.push(mv.san);
+        }
+        // Always finish on your own move, never on the opponent's reply.
+        while(lineSans.length && lineSans.length % 2 === 0) lineSans.pop();
+        if(!lineSans.length) continue;
         seen[fen] = true;
         puzzles.push({
           id: 'z_' + Date.now() + '_' + Math.floor(Math.random() * 10000),
-          fen: fen, userColor: mover, solution: solution,
+          fen: fen, userColor: mover,
+          solution: lineSans[0], line: lineSans,
           played: g.sans[ply] || '?',
           loss: Math.round(before - after),
           url: g.url, opponent: g.opponent, date: g.date,
@@ -1911,21 +1988,31 @@
   }
 
   // ---- Solving ----
+  // Older saved puzzles only stored a single solution move; treat them as a one-move line.
+  function pzLineOf(p){ return (p.line && p.line.length) ? p.line : [p.solution]; }
+
   function openPuzzle(i){
     if(i < 0 || i >= puzzles.length) return;
     pzIndex = i;
     const p = puzzles[i];
     pzChess = new Chess(p.fen);
-    pzSel = null; pzTargets = []; pzSolved = false;
-    pzSolveWrap.style.display = 'block';
-    pzPromptEl.textContent = (p.userColor === 'w' ? 'White' : 'Black') + ' to play — you played ' +
-      p.played + ' here. Find the better move.';
-    pzFeedbackEl.textContent = ''; pzFeedbackEl.className = 'form-msg';
+    pzSel = null; pzTargets = []; pzSolved = false; pzStep = 0;
+    pzTitleEl.textContent = 'Puzzle ' + (i + 1) + ' of ' + puzzles.length;
+    pzSideBadgeEl.textContent = 'Playing ' + (p.userColor === 'w' ? 'White' : 'Black');
+    pzSetStatus('You played ' + p.played + ' here. Find the better move.', 'info');
     pzMetaEl.innerHTML = 'Move ' + p.moveNo + ' vs ' + escapeHtml(p.opponent) +
-      ' · cost ' + (p.loss / 100).toFixed(1) + ' pawns' +
       (p.url ? ' · <a href="' + escapeHtml(p.url) + '" target="_blank" rel="noopener" style="color:var(--brass);">view game</a>' : '');
+    renderPuzzleStepBadge();
     renderPuzzleBoard();
     renderPuzzleList();
+  }
+
+  function renderPuzzleStepBadge(){
+    if(pzIndex < 0){ pzStepBadgeEl.textContent = '—'; return; }
+    const total = Math.ceil(pzLineOf(puzzles[pzIndex]).length / 2);
+    pzStepBadgeEl.textContent = total > 1
+      ? 'Move ' + Math.min(Math.floor(pzStep / 2) + 1, total) + ' of ' + total
+      : 'One move';
   }
 
   function renderPuzzleBoard(){
@@ -1974,21 +2061,42 @@
     const target = pzTargets.find(t => t.to === sqName);
     if(!target){ reselect(); return; }
     const p = puzzles[pzIndex];
+    const line = pzLineOf(p);
     const res = pzChess.move({ from: pzSel, to: sqName, promotion: 'q' });
     pzSel = null; pzTargets = [];
     if(!res){ renderPuzzleBoard(); return; }
-    if(stripSym(res.san) === stripSym(p.solution)){
-      pzSolved = true;
-      if(!p.solved){ p.solved = true; savePuzzles(); }
-      pzFeedbackEl.textContent = 'Correct — ' + p.solution + ' was the move.';
-      pzFeedbackEl.className = 'form-msg ok';
-      renderPuzzleList();
-    }else{
+
+    if(stripSym(res.san) !== stripSym(line[pzStep])){
       pzChess.undo();
-      pzFeedbackEl.textContent = res.san + ' isn\'t it — try again.';
-      pzFeedbackEl.className = 'form-msg err';
+      pzSetStatus(res.san + ' isn\'t it — try again.', 'err');
+      renderPuzzleBoard();
+      return;
     }
+
+    pzStep++;
+    const reply = line[pzStep];
+    if(reply){
+      // The opponent's forced answer — play it for them, then ask for the follow-up.
+      pzSetStatus('Correct. ' + res.san + ' — now they reply ' + reply + '…', 'ok');
+      renderPuzzleBoard();
+      renderPuzzleStepBadge();
+      setTimeout(() => {
+        if(pzIndex < 0 || !pzChess) return;
+        pzChess.move(reply, { sloppy: true });
+        pzStep++;
+        pzSetStatus('They played ' + reply + '. Keep going — find the next move.', 'info');
+        renderPuzzleStepBadge();
+        renderPuzzleBoard();
+      }, 650);
+      return;
+    }
+
+    pzSolved = true;
+    if(!p.solved){ p.solved = true; savePuzzles(); }
+    pzSetStatus('Solved — the line was ' + line.join(' ') + '. Press Next for another.', 'ok');
+    renderPuzzleStepBadge();
     renderPuzzleBoard();
+    renderPuzzleList();
   }
 
   function renderPuzzleList(){
@@ -2000,10 +2108,11 @@
     puzzles.forEach((p, i) => {
       const row = document.createElement('div');
       row.className = 'pz-item' + (i === pzIndex ? ' active' : '');
+      const plies = Math.ceil(pzLineOf(p).length / 2);
       row.innerHTML = '<div><div class="pz-name">' + (p.solved ? '<span class="pz-tick">✓</span> ' : '') +
         'Move ' + p.moveNo + ' vs ' + escapeHtml(p.opponent) + '</div>' +
-        '<div class="pz-sub">you played ' + escapeHtml(p.played) + ' · cost ' +
-        (p.loss / 100).toFixed(1) + ' pawns</div></div>';
+        '<div class="pz-sub">you played ' + escapeHtml(p.played) +
+        (plies > 1 ? ' · ' + plies + ' moves to find' : '') + '</div></div>';
       row.addEventListener('click', () => openPuzzle(i));
       pzListEl.appendChild(row);
     });
@@ -2014,18 +2123,31 @@
   pzCancelBtn.addEventListener('click', () => { pzCancel = true; pzSetMsg('Stopping after this position…', ''); });
   $('pzSolutionBtn').addEventListener('click', () => {
     if(pzIndex < 0) return;
-    pzFeedbackEl.textContent = 'The move was ' + puzzles[pzIndex].solution + '.';
-    pzFeedbackEl.className = 'form-msg';
+    const line = pzLineOf(puzzles[pzIndex]);
+    pzSetStatus(line.length > 1 ? 'The line was ' + line.join(' ') + '.' : 'The move was ' + line[0] + '.', 'info');
   });
+  $('pzRetryBtn').addEventListener('click', () => { if(pzIndex >= 0) openPuzzle(pzIndex); });
   $('pzNextBtn').addEventListener('click', () => { if(puzzles.length) openPuzzle((pzIndex + 1) % puzzles.length); });
   $('pzPrevBtn').addEventListener('click', () => { if(puzzles.length) openPuzzle((pzIndex - 1 + puzzles.length) % puzzles.length); });
+  $('pzShuffleBtn').addEventListener('click', () => {
+    if(puzzles.length < 2) return;
+    puzzles = shuffleArray(puzzles);
+    savePuzzles();
+    openPuzzle(0);
+  });
   $('pzClearBtn').addEventListener('click', () => {
     if(!puzzles.length) return;
     if(!confirm('Delete all ' + puzzles.length + ' saved puzzles?')) return;
     puzzles = []; savePuzzles(); pzIndex = -1; pzChess = null;
-    pzSolveWrap.style.display = 'none';
+    pzTitleEl.textContent = 'No puzzle loaded';
+    pzSideBadgeEl.textContent = '—'; pzStepBadgeEl.textContent = '—';
+    pzMetaEl.textContent = '';
+    pzSetStatus('Import some games in the Puzzles panel to begin.', 'info');
+    renderPuzzleBoard();
     renderPuzzleList(); pzSetMsg('', '');
   });
+  $('pzMax').addEventListener('change', pzUpdateEstimate);
+  $('pzCoverage').addEventListener('change', pzUpdateEstimate);
   try{
     const f = JSON.parse(localStorage.getItem(PZ_FORM_KEY) || 'null');
     if(f){
@@ -2033,8 +2155,10 @@
       if(f.user) $('pzUser').value = f.user;
       if(f.speed) $('pzSpeed').value = f.speed;
       if(f.max) $('pzMax').value = String(f.max);
+      if(f.coverage) $('pzCoverage').value = f.coverage;
     }
   }catch(e){}
+  pzUpdateEstimate();
 
   // ============================================================
   // 10. FOCUS MODE — fullscreen practice view
