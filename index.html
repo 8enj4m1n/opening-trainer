@@ -2035,20 +2035,13 @@
     return 'It holds your advantage together instead of handing it over.';
   }
 
-  // Centipawns to win probability uses the standard engine sigmoid; win probability to a
-  // rating-point equivalent uses the Elo expected-score formula. An approximation, but it
-  // answers "how much was that move actually worth?" better than a raw pawn count.
-  function pzWinProb(cp){
-    return 1 / (1 + Math.exp(-0.00368208 * Math.max(-1500, Math.min(1500, cp))));
-  }
-  function pzEloEquiv(wp){
-    const w = Math.max(0.02, Math.min(0.98, wp));
-    return -400 * Math.log(1 / w - 1) / Math.LN10;
-  }
-  function pzEloGain(p){
-    const before = (p.cpBefore === undefined) ? 0 : p.cpBefore;
-    const after  = (p.cpAfter  === undefined) ? -(p.loss || 0) : p.cpAfter;
-    return Math.max(0, Math.round(pzEloEquiv(pzWinProb(before)) - pzEloEquiv(pzWinProb(after))));
+  // Stockfish's own evaluation, written the way an engine shows it: pawns, signed from your
+  // side. Mate scores come through as the large sentinel, so catch those first.
+  function pzFmtEval(cp){
+    if(cp >= 20000) return 'mate';
+    if(cp <= -20000) return 'getting mated';
+    const v = cp / 100;
+    return (v >= 0 ? '+' : '') + v.toFixed(2);
   }
 
   function renderPuzzleMeta(showValue){
@@ -2057,8 +2050,15 @@
     let html = 'Move ' + p.moveNo + ' vs ' + escapeHtml(p.opponent) +
       (p.url ? ' · <a href="' + escapeHtml(p.url) + '" target="_blank" rel="noopener" style="color:var(--brass);">view game</a>' : '');
     if(showValue){
-      html = 'Worth about <strong style="color:var(--brass);">' + pzEloGain(p) +
-             ' rating points</strong> more than the move you played · ' + html;
+      const before = (p.cpBefore === undefined) ? null : p.cpBefore;
+      const after  = (p.cpAfter  === undefined) ? null : p.cpAfter;
+      const swing = ((before !== null && after !== null ? before - after : (p.loss || 0)) / 100).toFixed(2);
+      let val = 'Stockfish: <strong style="color:var(--brass);">' + swing + '</strong> better';
+      if(before !== null && after !== null){
+        val += ' — <strong>' + pzFmtEval(before) + '</strong> with the right move, <strong>' +
+               pzFmtEval(after) + '</strong> with what you played';
+      }
+      html = val + ' · ' + html;
     }
     pzMetaEl.innerHTML = html;
   }
