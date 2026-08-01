@@ -1955,19 +1955,7 @@
         if(!ok) continue;
         const fen = t.fen();
         if(seen[fen]) continue;
-        // Walk the engine's principal variation into real notation. The puzzle keeps going
-        // for as long as this line does, so a strong forced reply becomes the next question
-        // rather than ending the puzzle after one move.
-        const lineChess = new Chess(fen);
-        const lineSans = [];
-        for(const uci of (a.pvLine || [a.pv]).slice(0, PZ_LINE_PLIES)){
-          const mv = lineChess.move({ from: uci.slice(0,2), to: uci.slice(2,4),
-                                      promotion: uci.length > 4 ? uci[4] : undefined });
-          if(!mv) break;
-          lineSans.push(mv.san);
-        }
-        // Always finish on your own move, never on the opponent's reply.
-        while(lineSans.length && lineSans.length % 2 === 0) lineSans.pop();
+        const lineSans = pzBuildLine(fen, a.pvLine || [a.pv]);
         if(!lineSans.length) continue;
         seen[fen] = true;
         puzzles.push({
@@ -1976,6 +1964,7 @@
           solution: lineSans[0], line: lineSans,
           played: g.sans[ply] || '?',
           loss: Math.round(before - after),
+          cpBefore: Math.round(before), cpAfter: Math.round(after),
           url: g.url, opponent: g.opponent, date: g.date,
           moveNo: Math.floor(ply / 2) + 1,
           solved: false, createdAt: Date.now()
@@ -1991,6 +1980,89 @@
   // Older saved puzzles only stored a single solution move; treat them as a one-move line.
   function pzLineOf(p){ return (p.line && p.line.length) ? p.line : [p.solution]; }
 
+  const PZ_VAL = { p:1, n:3, b:3, r:5, q:9, k:0 };
+  const PZ_PIECE_NAME = { p:'pawn', n:'knight', b:'bishop', r:'rook', q:'queen' };
+
+  // Walks the engine's principal variation into a solution line. Your first move is always
+  // kept; a further move of yours is only added when it genuinely pays — it must win real
+  // material or force mate. A quiet engine follow-up ends the puzzle instead of asking you
+  // to guess a move that has no clear point.
+  function pzBuildLine(fen, ucis){
+    const board = new Chess(fen);
+    const out = [];
+    for(let i = 0; i < ucis.length && out.length < PZ_LINE_PLIES; i++){
+      const uci = ucis[i];
+      const probe = new Chess(board.fen());
+      const mv = probe.move({ from: uci.slice(0,2), to: uci.slice(2,4),
+                              promotion: uci.length > 4 ? uci[4] : undefined });
+      if(!mv) break;
+      if(i > 0 && i % 2 === 0){
+        const gain = mv.captured ? PZ_VAL[mv.captured] : 0;
+        if(!probe.in_checkmate() && gain < 2) break; // nothing much won — stop here
+      }
+      board.move(mv.san, { sloppy: true });
+      out.push(mv.san);
+    }
+    while(out.length && out.length % 2 === 0) out.pop(); // always finish on your own move
+    return out;
+  }
+
+  // A short reason the move works, read off what actually happens on the board over the
+  // solution line (material won, mate, checks) rather than invented commentary.
+  function pzExplain(p){
+    const line = pzLineOf(p);
+    const t = new Chess(p.fen);
+    let mine = 0, theirs = 0, biggest = null, mate = false, checks = 0;
+    line.forEach((san, i) => {
+      const mv = t.move(san, { sloppy: true });
+      if(!mv) return;
+      if(mv.captured){
+        if(i % 2 === 0){
+          mine += PZ_VAL[mv.captured];
+          if(!biggest || PZ_VAL[mv.captured] > PZ_VAL[biggest]) biggest = mv.captured;
+        }else theirs += PZ_VAL[mv.captured];
+      }
+      if(t.in_checkmate()) mate = true;
+      else if(t.in_check() && i % 2 === 0) checks++;
+    });
+    if(mate) return 'It forces checkmate.';
+    const net = mine - theirs;
+    if(net >= 9) return 'It wins a queen\'s worth of material.';
+    if(net >= 5) return 'It wins ' + net + ' points of material — a rook or better.';
+    if(net >= 3) return 'It wins a ' + (PZ_PIECE_NAME[biggest] || 'piece') + '.';
+    if(net >= 1) return 'It wins a pawn' + (net > 1 ? ' and keeps pressing' : '') + '.';
+    if(checks) return 'It seizes the initiative with a forcing check.';
+    return 'It holds your advantage together instead of handing it over.';
+  }
+
+  // Centipawns to win probability uses the standard engine sigmoid; win probability to a
+  // rating-point equivalent uses the Elo expected-score formula. An approximation, but it
+  // answers "how much was that move actually worth?" better than a raw pawn count.
+  function pzWinProb(cp){
+    return 1 / (1 + Math.exp(-0.00368208 * Math.max(-1500, Math.min(1500, cp))));
+  }
+  function pzEloEquiv(wp){
+    const w = Math.max(0.02, Math.min(0.98, wp));
+    return -400 * Math.log(1 / w - 1) / Math.LN10;
+  }
+  function pzEloGain(p){
+    const before = (p.cpBefore === undefined) ? 0 : p.cpBefore;
+    const after  = (p.cpAfter  === undefined) ? -(p.loss || 0) : p.cpAfter;
+    return Math.max(0, Math.round(pzEloEquiv(pzWinProb(before)) - pzEloEquiv(pzWinProb(after))));
+  }
+
+  function renderPuzzleMeta(showValue){
+    const p = puzzles[pzIndex];
+    if(!p){ pzMetaEl.textContent = ''; return; }
+    let html = 'Move ' + p.moveNo + ' vs ' + escapeHtml(p.opponent) +
+      (p.url ? ' · <a href="' + escapeHtml(p.url) + '" target="_blank" rel="noopener" style="color:var(--brass);">view game</a>' : '');
+    if(showValue){
+      html = 'Worth about <strong style="color:var(--brass);">' + pzEloGain(p) +
+             ' rating points</strong> more than the move you played · ' + html;
+    }
+    pzMetaEl.innerHTML = html;
+  }
+
   function openPuzzle(i){
     if(i < 0 || i >= puzzles.length) return;
     pzIndex = i;
@@ -2000,8 +2072,7 @@
     pzTitleEl.textContent = 'Puzzle ' + (i + 1) + ' of ' + puzzles.length;
     pzSideBadgeEl.textContent = 'Playing ' + (p.userColor === 'w' ? 'White' : 'Black');
     pzSetStatus('You played ' + p.played + ' here. Find the better move.', 'info');
-    pzMetaEl.innerHTML = 'Move ' + p.moveNo + ' vs ' + escapeHtml(p.opponent) +
-      (p.url ? ' · <a href="' + escapeHtml(p.url) + '" target="_blank" rel="noopener" style="color:var(--brass);">view game</a>' : '');
+    renderPuzzleMeta(false);
     renderPuzzleStepBadge();
     renderPuzzleBoard();
     renderPuzzleList();
@@ -2093,7 +2164,8 @@
 
     pzSolved = true;
     if(!p.solved){ p.solved = true; savePuzzles(); }
-    pzSetStatus('Solved — the line was ' + line.join(' ') + '. Press Next for another.', 'ok');
+    pzSetStatus('Solved — ' + line.join(' ') + '. ' + pzExplain(p), 'ok');
+    renderPuzzleMeta(true);
     renderPuzzleStepBadge();
     renderPuzzleBoard();
     renderPuzzleList();
@@ -2123,8 +2195,10 @@
   pzCancelBtn.addEventListener('click', () => { pzCancel = true; pzSetMsg('Stopping after this position…', ''); });
   $('pzSolutionBtn').addEventListener('click', () => {
     if(pzIndex < 0) return;
-    const line = pzLineOf(puzzles[pzIndex]);
-    pzSetStatus(line.length > 1 ? 'The line was ' + line.join(' ') + '.' : 'The move was ' + line[0] + '.', 'info');
+    const p = puzzles[pzIndex];
+    const line = pzLineOf(p);
+    pzSetStatus((line.length > 1 ? 'The line was ' + line.join(' ') + '. ' : 'The move was ' + line[0] + '. ') + pzExplain(p), 'info');
+    renderPuzzleMeta(true);
   });
   $('pzRetryBtn').addEventListener('click', () => { if(pzIndex >= 0) openPuzzle(pzIndex); });
   $('pzNextBtn').addEventListener('click', () => { if(puzzles.length) openPuzzle((pzIndex + 1) % puzzles.length); });
