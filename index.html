@@ -1605,7 +1605,9 @@
   const PZ_MAX_PLY = 80;         // bound the cost of very long games
   const PZ_LOSS = 150;           // centipawns lost before it counts as a mistake
   const PZ_UNIQUE_GAP = 40;      // best move must beat the runner-up by this much
-  const PZ_DECIDED = 1000;       // skip positions already completely won/lost
+  const PZ_DECIDED = 200;        // with the correct move you must still be within 2 pawns of
+                                 // Stockfish's balance point — no puzzles from positions that
+                                 // were already winning or already lost
   const PZ_MATE_CP = 30000;      // sentinel so "mate in N" survives the arithmetic
   const PZ_LINE_PLIES = 7;       // longest solution line kept (always ends on your move)
   const PZ_SECS_PER_POS = 0.7;   // rough per-position cost, refined live once a scan starts
