@@ -158,6 +158,17 @@
   .ungrouped-drop{display:flex;flex-direction:column;gap:10px;min-height:12px;border-radius:8px;}
   .ungrouped-drop.drag-over{outline:2px dashed var(--brass);outline-offset:4px;}
 
+  /* Puzzles tab */
+  .pz-bar{height:6px;background:var(--panel-2);border:1px solid var(--line);border-radius:4px;overflow:hidden;margin:12px 0 6px;}
+  .pz-bar-fill{height:100%;width:0%;background:var(--brass);transition:width .2s linear;}
+  #pzBoardOuter{max-width:380px;margin:0 auto 10px;}
+  .pz-item{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;}
+  .pz-item:hover{border-color:var(--brass);}
+  .pz-item.active{border-color:var(--brass);background:rgba(201,154,74,.08);}
+  .pz-item .pz-name{font-size:13.5px;}
+  .pz-item .pz-sub{color:var(--muted);font-size:11.5px;font-family:'JetBrains Mono',monospace;margin-top:3px;}
+  .pz-item .pz-tick{color:var(--felt);font-weight:700;}
+
   /* Edit-mode banner & editor board sizing */
   .edit-banner{background:rgba(201,154,74,.12);border:1px solid var(--brass);color:var(--brass);padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
   .edit-banner button{padding:4px 10px;font-size:12px;}
@@ -216,6 +227,7 @@
         <button class="tab active" data-tab="practice">Practice</button>
         <button class="tab" data-tab="library">Library</button>
         <button class="tab" data-tab="add">Add / edit</button>
+        <button class="tab" data-tab="puzzles">Puzzles</button>
       </div>
 
       <div id="tab-practice">
@@ -287,6 +299,68 @@
           </div>
         </details>
       </div>
+
+      <div id="tab-puzzles" style="display:none;">
+        <p class="hint" style="margin-bottom:14px;">Pulls your recent <strong>rated</strong> games, finds the moves where you lost the most, and turns them into puzzles. Standard chess only.</p>
+
+        <div class="field">
+          <label for="pzSite">Site</label>
+          <select id="pzSite">
+            <option value="lichess">Lichess</option>
+            <option value="chesscom">Chess.com</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="pzUser">Username</label>
+          <input type="text" id="pzUser" placeholder="your username on that site">
+        </div>
+        <div class="field">
+          <label for="pzSpeed">Time control</label>
+          <select id="pzSpeed">
+            <option value="bullet">Bullet</option>
+            <option value="blitz" selected>Blitz</option>
+            <option value="rapid">Rapid</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="pzMax">How many games to analyse</label>
+          <select id="pzMax">
+            <option value="3">3 games — quickest</option>
+            <option value="5" selected>5 games</option>
+            <option value="10">10 games — slow</option>
+            <option value="20">20 games — very slow</option>
+          </select>
+          <p class="hint">Only games played within your rating band count. The engine runs in your browser, so more games means a longer wait.</p>
+        </div>
+
+        <div class="board-actions">
+          <button class="primary" id="pzFindBtn" type="button">Find puzzles</button>
+          <button class="ghost" id="pzCancelBtn" type="button" style="display:none;">Cancel</button>
+        </div>
+        <div class="form-msg" id="pzMsg"></div>
+        <div id="pzProgressWrap" style="display:none;">
+          <div class="pz-bar"><div class="pz-bar-fill" id="pzBarFill"></div></div>
+          <div class="hint" id="pzProgressText"></div>
+        </div>
+
+        <div id="pzSolveWrap" style="display:none;margin-top:18px;">
+          <div class="hint" id="pzPrompt" style="text-align:center;margin-bottom:8px;"></div>
+          <div class="board-outer" id="pzBoardOuter"><div class="board" id="pzBoard"></div></div>
+          <div class="board-actions" style="justify-content:center;">
+            <button class="ghost" id="pzPrevBtn" type="button">← Prev</button>
+            <button class="ghost" id="pzSolutionBtn" type="button">Show solution</button>
+            <button class="ghost" id="pzNextBtn" type="button">Next →</button>
+          </div>
+          <div class="form-msg" id="pzFeedback" style="text-align:center;"></div>
+          <div class="hint" id="pzMeta" style="text-align:center;"></div>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:18px 0 8px;gap:8px;flex-wrap:wrap;">
+          <span style="font-size:12.5px;color:var(--muted);">Saved puzzles</span>
+          <button class="ghost" id="pzClearBtn" type="button" style="padding:4px 10px;font-size:12px;">Clear all</button>
+        </div>
+        <div id="pzList"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -305,10 +379,11 @@
   //   6. LIBRARY        — saved-drill list (practice / edit / delete)
   //   7. ADD / EDIT     — building lines on the editor board
   //   8. ENGINE         — Fairy-Stockfish WASM analysis + pre-scan
-  //   9. FOCUS MODE     — fullscreen practice view
-  //  10. ARROW KEYS     — practice review + editor undo/redo
-  //  11. ERROR REPORTING (Sentry)
-  //  12. INIT
+  //   9. PUZZLES        — mistakes mined from your chess.com / lichess games
+  //  10. FOCUS MODE     — fullscreen practice view
+  //  11. ARROW KEYS     — practice review + editor undo/redo
+  //  12. ERROR REPORTING (Sentry)
+  //  13. INIT
   // ============================================================
 
   // ============================================================
@@ -859,9 +934,10 @@
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      ['practice','library','add'].forEach(name => { $('tab-'+name).style.display = (name === tab.dataset.tab) ? 'block' : 'none'; });
+      ['practice','library','add','puzzles'].forEach(name => { $('tab-'+name).style.display = (name === tab.dataset.tab) ? 'block' : 'none'; });
       if(tab.dataset.tab === 'library') renderLibraryTab();
       if(tab.dataset.tab === 'add'){ if(engineOn) loadEngine(); renderEditBoard(); renderEditLedger(); }
+      if(tab.dataset.tab === 'puzzles') renderPuzzleList();
     });
   });
 
@@ -1229,6 +1305,11 @@
   let engineTargets = {};   // per-position depth targets raised by the Deeper button (not persisted)
   let prescanQueue = null;
   let enginePrescanDirty = true;
+  // While a puzzle scan runs it owns the engine exclusively: the editor analysis and the
+  // library pre-scan both stand down, because the scan needs a different UCI_Variant
+  // (always standard chess) and MultiPV 2. Restored by endScan().
+  let scanActive = false;
+  let scanConfigured = false;
   let engineCache = {};
   try{ engineCache = JSON.parse(localStorage.getItem(ENGINE_CACHE_KEY) || '{}') || {}; }catch(e){ engineCache = {}; }
   try{ engineOn = localStorage.getItem(ENGINE_ON_KEY) === '1'; }catch(e){}
@@ -1291,12 +1372,21 @@
   function onEngineLine(line){
     if(line === 'readyok' && engineStatus === 'loading'){
       engineStatus = 'ready';
+      if(scanActive){
+        // First readyok after load: apply the scan's engine options, which needs another
+        // isready round-trip. Second readyok: options are live, so start searching.
+        if(!scanConfigured){ configureScanEngine(); return; }
+        engine.postMessage('ucinewgame');
+        pumpScan();
+        return;
+      }
       engine.postMessage('ucinewgame');
       analyzeEditPosition();
       maybePrescan();
       return;
     }
-    if(!engineBusy) return;
+    if(engineStatus === 'failed' || !engineBusy) return;
+    if(engineBusy.scan){ onScanLine(line); return; }
     if(line.indexOf('bestmove') === 0){
       const finished = engineBusy; engineBusy = null;
       const mv = line.split(' ')[1];
@@ -1335,11 +1425,24 @@
   // ---- Loading & searching ----
   function engineVariant(){ return gameMode === 'three-check' ? '3check' : 'chess'; }
 
+  // Marks the engine dead and, if a puzzle scan was waiting on it, tears the scan down
+  // instead of leaving it stuck behind a progress bar that will never move.
+  function markEngineFailed(){
+    engineStatus = 'failed';
+    renderEngineInfo();
+    if(scanActive){
+      scanActive = false; scanConfigured = false; engineBusy = null;
+      pzCancelBtn.style.display = 'none';
+      pzProgressWrap.style.display = 'none';
+      pzFindBtn.disabled = false;
+      pzSetMsg('The engine failed to start, so no games could be analysed. Try fully reloading the page.', 'err');
+    }
+  }
+
   function loadEngine(){
     if(engine || engineStatus === 'loading' || engineStatus === 'failed') return;
     if(!window.crossOriginIsolated){
-      engineStatus = 'failed';
-      renderEngineInfo();
+      markEngineFailed();
       return;
     }
     engineStatus = 'loading';
@@ -1354,9 +1457,9 @@
         engine.postMessage('setoption name UCI_Variant value ' + engineVariant());
         engine.postMessage('setoption name Threads value ' + Math.min(4, navigator.hardwareConcurrency || 1));
         engine.postMessage('isready');
-      }).catch(() => { engineStatus = 'failed'; renderEngineInfo(); });
+      }).catch(() => { markEngineFailed(); });
     };
-    s.onerror = () => { engineStatus = 'failed'; renderEngineInfo(); };
+    s.onerror = () => { markEngineFailed(); };
     document.head.appendChild(s);
   }
 
@@ -1379,6 +1482,7 @@
   }
 
   function analyzeEditPosition(){
+    if(scanActive) return; // a puzzle scan owns the engine
     renderEngineInfo();
     if(!engineOn || engineStatus !== 'ready') return;
     const pos = editEnginePos();
@@ -1423,6 +1527,7 @@
   }
 
   function maybePrescan(){
+    if(scanActive) return; // a puzzle scan owns the engine
     if(!engineOn || engineStatus !== 'ready' || engineBusy) return;
     if(enginePrescanDirty || !prescanQueue){ prescanQueue = buildPrescanQueue(); enginePrescanDirty = false; }
     while(prescanQueue.length){
@@ -1464,7 +1569,475 @@
   });
 
   // ============================================================
-  // 9. FOCUS MODE — fullscreen practice view
+  // 9. PUZZLES — mistakes mined from your real online games
+  //
+  // Pipeline: look up your current rating → pull recent rated games in the chosen
+  // time control → keep only those played inside your rating band → have the engine
+  // evaluate every ply once → wherever your move dropped the eval sharply and the
+  // engine's best move was clearly unique, save that position as a puzzle.
+  // ============================================================
+  const PUZZLES_KEY = 'repertoire-puzzles';
+  const PZ_FORM_KEY = 'repertoire-puzzle-form';
+  const PZ_SCAN_DEPTH = 12;      // shallow, but plenty to spot a real blunder
+  const PZ_SCAN_MOVETIME = 4000; // safety cap per position (ms)
+  const PZ_SKIP_OPENING = 6;     // don't mine book moves
+  const PZ_MAX_PLY = 80;         // bound the cost of very long games
+  const PZ_LOSS = 150;           // centipawns lost before it counts as a mistake
+  const PZ_UNIQUE_GAP = 40;      // best move must beat the runner-up by this much
+  const PZ_DECIDED = 1000;       // skip positions already completely won/lost
+  const PZ_MATE_CP = 30000;      // sentinel so "mate in N" survives the arithmetic
+
+  let puzzles = [];
+  try{ puzzles = JSON.parse(localStorage.getItem(PUZZLES_KEY) || '[]') || []; }catch(e){ puzzles = []; }
+
+  let pzGames = [];   // games queued for this scan
+  let pzJobs = [];    // one entry per position the engine must look at
+  let pzJobIdx = 0;
+  let pzEvals = [];   // pzEvals[gameIdx][ply] = { cp (White-relative), pv, gap }
+  let pzCancel = false;
+  let pzIndex = -1;   // which puzzle is open
+  let pzChess = null;
+  let pzSel = null;
+  let pzTargets = [];
+  let pzSolved = false;
+
+  const pzMsgEl = $('pzMsg'), pzBarFill = $('pzBarFill'), pzProgressWrap = $('pzProgressWrap'),
+        pzProgressText = $('pzProgressText'), pzFindBtn = $('pzFindBtn'), pzCancelBtn = $('pzCancelBtn'),
+        pzSolveWrap = $('pzSolveWrap'), pzPromptEl = $('pzPrompt'), pzFeedbackEl = $('pzFeedback'),
+        pzMetaEl = $('pzMeta'), pzListEl = $('pzList');
+
+  function savePuzzles(){ try{ localStorage.setItem(PUZZLES_KEY, JSON.stringify(puzzles)); }catch(e){} }
+  function pzSetMsg(t, kind){ pzMsgEl.textContent = t; pzMsgEl.className = 'form-msg ' + (kind || ''); }
+
+  // Tighter band the stronger you are: ±150 below 1500, ±100 to 2099, ±75 above.
+  function pzRatingWindow(rating){ return rating >= 2100 ? 75 : (rating >= 1500 ? 100 : 150); }
+
+  // ---- PGN parsing (same shape for both sites) ----
+  function pzParsePgn(pgn){
+    const headers = {};
+    const finder = /^\[(\w+)\s+"([^"]*)"\]\s*$/gm;
+    let m;
+    while((m = finder.exec(pgn))) headers[m[1]] = m[2];
+    let text = pgn.replace(/^\[(\w+)\s+"([^"]*)"\]\s*$/gm, '')
+                  .replace(/\{[^}]*\}/g, ' ')   // {[%clk ...]} comments
+                  .replace(/;[^\n]*/g, ' ')     // ; rest-of-line comments
+                  .replace(/\$\d+/g, ' ');      // NAGs
+    let flat = '', depth = 0;                   // drop ( ... ) variations, nesting aware
+    for(let i = 0; i < text.length; i++){
+      const ch = text[i];
+      if(ch === '('){ depth++; continue; }
+      if(ch === ')'){ if(depth > 0){ depth--; continue; } }
+      if(depth === 0) flat += ch;
+    }
+    const isResult = (t) => t === '1-0' || t === '0-1' || t === '1/2-1/2' || t === '*';
+    const sans = [];
+    flat.split(/\s+/).forEach(raw => {
+      let t = raw.trim();
+      if(!t || isResult(t)) return;
+      t = t.replace(/^\d+\.+/, '');             // "1." / "1..." / "1.d4"
+      if(!t || isResult(t) || /^\d+\.*$/.test(t)) return;
+      sans.push(t);
+    });
+    return { headers: headers, sans: sans };
+  }
+
+  // Turns one raw PGN into an analysable game, or null if it doesn't qualify.
+  function pzPrepGame(rec, username){
+    const parsed = pzParsePgn(rec.pgn);
+    const h = parsed.headers;
+    if(h.FEN || h.SetUp) return null;                             // custom start position
+    if(h.Variant && !/^standard$/i.test(h.Variant)) return null;  // not normal chess
+    const u = username.toLowerCase();
+    let userColor = null;
+    if((h.White || '').toLowerCase() === u) userColor = 'w';
+    else if((h.Black || '').toLowerCase() === u) userColor = 'b';
+    if(!userColor) return null;
+    const elo = parseInt(userColor === 'w' ? h.WhiteElo : h.BlackElo, 10);
+    const t = new Chess();
+    const ucis = [], sans = [];
+    for(const san of parsed.sans){
+      const mv = t.move(san, { sloppy: true });
+      if(!mv) break;
+      ucis.push(mv.from + mv.to + (mv.promotion || ''));
+      sans.push(mv.san);
+    }
+    if(ucis.length < PZ_SKIP_OPENING + 4) return null;            // too short to mine
+    return {
+      ucis: ucis, sans: sans, userColor: userColor,
+      elo: isNaN(elo) ? null : elo,
+      url: rec.url || h.Site || h.Link || '',
+      opponent: userColor === 'w' ? (h.Black || '?') : (h.White || '?'),
+      date: h.UTCDate || h.Date || ''
+    };
+  }
+
+  // ---- Fetching ----
+  async function pzFetchRating(site, user, speed){
+    if(site === 'lichess'){
+      const r = await fetch('https://lichess.org/api/user/' + encodeURIComponent(user));
+      if(r.status === 404) throw new Error('No Lichess account called "' + user + '".');
+      if(r.status === 429) throw new Error('Lichess is rate-limiting requests — wait about a minute and try again.');
+      if(!r.ok) throw new Error('Lichess returned ' + r.status + '.');
+      const perf = ((await r.json()).perfs || {})[speed];
+      if(!perf || !perf.rating) throw new Error('That Lichess account has no ' + speed + ' rating yet.');
+      return perf.rating;
+    }
+    const r = await fetch('https://api.chess.com/pub/player/' + encodeURIComponent(user.toLowerCase()) + '/stats');
+    if(r.status === 404) throw new Error('No Chess.com account called "' + user + '".');
+    if(!r.ok) throw new Error('Chess.com returned ' + r.status + '.');
+    const perf = (await r.json())['chess_' + speed];
+    if(!perf || !perf.last || !perf.last.rating) throw new Error('That Chess.com account has no ' + speed + ' rating yet.');
+    return perf.last.rating;
+  }
+
+  async function pzFetchGames(site, user, speed, want){
+    if(site === 'lichess'){
+      const r = await fetch('https://lichess.org/api/games/user/' + encodeURIComponent(user) +
+                            '?max=' + want + '&rated=true&perfType=' + speed);
+      if(r.status === 429) throw new Error('Lichess is rate-limiting requests — wait about a minute and try again.');
+      if(r.status === 404) throw new Error('No Lichess account called "' + user + '".');
+      if(!r.ok) throw new Error('Lichess returned ' + r.status + '.');
+      return (await r.text()).split(/\n\n(?=\[Event )/)
+        .filter(s => s.trim()).map(s => ({ pgn: s, url: null }));
+    }
+    const ar = await fetch('https://api.chess.com/pub/player/' + encodeURIComponent(user.toLowerCase()) + '/games/archives');
+    if(ar.status === 404) throw new Error('No Chess.com account called "' + user + '".');
+    if(!ar.ok) throw new Error('Chess.com returned ' + ar.status + '.');
+    const archives = ((await ar.json()).archives) || [];
+    const out = [];
+    const stopAt = Math.max(0, archives.length - 6); // at most 6 months back
+    for(let i = archives.length - 1; i >= stopAt && out.length < want; i--){
+      const r = await fetch(archives[i]);
+      if(!r.ok) break;
+      const games = ((await r.json()).games) || [];
+      for(let k = games.length - 1; k >= 0 && out.length < want; k--){
+        const g = games[k];
+        if(g.rules !== 'chess' || g.time_class !== speed || !g.rated) continue;
+        out.push({ pgn: g.pgn, url: g.url });
+      }
+    }
+    return out;
+  }
+
+  async function pzFind(){
+    const site = $('pzSite').value, user = $('pzUser').value.trim(), speed = $('pzSpeed').value;
+    const cap = parseInt($('pzMax').value, 10);
+    if(!user){ pzSetMsg('Enter your username first.', 'err'); return; }
+    try{ localStorage.setItem(PZ_FORM_KEY, JSON.stringify({ site: site, user: user, speed: speed, max: cap })); }catch(e){}
+    pzFindBtn.disabled = true;
+    pzSetMsg('Looking up your ' + speed + ' rating…', '');
+    try{
+      const rating = await pzFetchRating(site, user, speed);
+      const win = pzRatingWindow(rating);
+      const lo = rating - win, hi = rating + win;
+      pzSetMsg('Rated ' + rating + ' — finding ' + speed + ' games played between ' + lo + ' and ' + hi + '…', '');
+      const raw = await pzFetchGames(site, user, speed, Math.max(60, cap * 8));
+      const kept = [];
+      for(const rec of raw){
+        if(kept.length >= cap) break;
+        const g = pzPrepGame(rec, user);
+        if(!g || g.elo === null) continue;
+        if(g.elo < lo || g.elo > hi) continue;
+        kept.push(g);
+      }
+      if(!kept.length){
+        pzSetMsg('No games matched. Looked for rated ' + speed + ' games played while you were rated ' + lo + '–' + hi + '.', 'err');
+        pzFindBtn.disabled = false;
+        return;
+      }
+      pzGames = kept;
+      pzSetMsg('Analysing ' + kept.length + ' game' + (kept.length === 1 ? '' : 's') + ' — this runs in your browser, so give it a few minutes.', 'ok');
+      beginScan();
+    }catch(err){
+      pzSetMsg((err && err.message) ? err.message : 'Could not reach that site.', 'err');
+      pzFindBtn.disabled = false;
+    }
+  }
+
+  // ---- Engine scan (owns the engine exclusively while it runs) ----
+  function beginScan(){
+    if(!window.crossOriginIsolated || engineStatus === 'failed'){
+      pzSetMsg('The engine can\'t start — reload the page once, then try again.', 'err');
+      pzFindBtn.disabled = false;
+      return;
+    }
+    pzJobs = []; pzEvals = []; pzJobIdx = 0; pzCancel = false;
+    pzGames.forEach((g, gi) => {
+      pzEvals[gi] = {};
+      const last = Math.min(g.ucis.length, PZ_MAX_PLY);
+      for(let ply = PZ_SKIP_OPENING; ply <= last; ply++) pzJobs.push({ gi: gi, ply: ply });
+    });
+    scanActive = true; scanConfigured = false;
+    pzCancelBtn.style.display = 'inline-block';
+    pzProgressWrap.style.display = 'block';
+    renderScanProgress();
+    if(!engine){ loadEngine(); return; } // the readyok handler picks it up from here
+    configureScanEngine();
+  }
+
+  function configureScanEngine(){
+    scanConfigured = true;
+    if(engineBusy){ engineBusy.stopped = true; engine.postMessage('stop'); engineBusy = null; }
+    engineStatus = 'loading';
+    engine.postMessage('setoption name UCI_Variant value chess'); // games are always standard chess
+    engine.postMessage('setoption name MultiPV value 2');         // 2nd-best tells us if the best move is unique
+    engine.postMessage('isready');
+  }
+
+  function renderScanProgress(){
+    const pct = pzJobs.length ? Math.round(pzJobIdx / pzJobs.length * 100) : 0;
+    pzBarFill.style.width = pct + '%';
+    pzProgressText.textContent = 'Position ' + Math.min(pzJobIdx + 1, pzJobs.length) +
+      ' of ' + pzJobs.length + ' · ' + pct + '%';
+  }
+
+  function pumpScan(){
+    if(!scanActive) return;
+    if(pzCancel){ endScan(true); return; }
+    if(pzJobIdx >= pzJobs.length){ endScan(false); return; }
+    const job = pzJobs[pzJobIdx];
+    const moves = pzGames[job.gi].ucis.slice(0, job.ply);
+    engineBusy = { scan: true, gi: job.gi, ply: job.ply, turn: job.ply % 2 === 0 ? 'w' : 'b',
+                   bestDepth: -1, cp: null, cp2: null, pv: null };
+    engine.postMessage(moves.length ? 'position startpos moves ' + moves.join(' ') : 'position startpos');
+    engine.postMessage('go movetime ' + PZ_SCAN_MOVETIME + ' depth ' + PZ_SCAN_DEPTH);
+    renderScanProgress();
+  }
+
+  // Mate scores become a large centipawn sentinel so they still subtract sensibly.
+  function pzScoreToCp(kind, val){
+    if(kind === 'mate') return val > 0 ? (PZ_MATE_CP - val) : -(PZ_MATE_CP + val);
+    return val;
+  }
+
+  function onScanLine(line){
+    if(line.indexOf('info ') === 0){
+      const d = line.match(/\bdepth (\d+)/);
+      const sc = line.match(/\bscore (cp|mate) (-?\d+)/);
+      if(!d || !sc) return;
+      const depth = parseInt(d[1], 10);
+      if(depth < engineBusy.bestDepth) return;
+      const mp = line.match(/\bmultipv (\d+)/);
+      const idx = mp ? parseInt(mp[1], 10) : 1;
+      const cp = pzScoreToCp(sc[1], parseInt(sc[2], 10));
+      if(idx === 1){
+        if(depth > engineBusy.bestDepth) engineBusy.cp2 = null; // runner-up is stale at a new depth
+        const pv = line.match(/\bpv ([a-h][1-8][a-h][1-8][qrbn]?)/);
+        engineBusy.bestDepth = depth;
+        engineBusy.cp = cp;
+        if(pv) engineBusy.pv = pv[1];
+      }else if(idx === 2){
+        engineBusy.cp2 = cp;
+      }
+      return;
+    }
+    if(line.indexOf('bestmove') === 0){
+      const j = engineBusy; engineBusy = null;
+      if(j.cp !== null){
+        pzEvals[j.gi][j.ply] = {
+          cp: j.turn === 'w' ? j.cp : -j.cp,  // normalise to White-relative straight away
+          pv: j.pv,
+          gap: j.cp2 === null ? null : (j.cp - j.cp2)
+        };
+      }
+      pzJobIdx++;
+      pumpScan();
+    }
+  }
+
+  function endScan(cancelled){
+    scanActive = false; scanConfigured = false;
+    if(engine && engineBusy) engine.postMessage('stop');
+    engineBusy = null;
+    pzCancelBtn.style.display = 'none';
+    pzProgressWrap.style.display = 'none';
+    pzFindBtn.disabled = false;
+    if(engine) engine.postMessage('setoption name MultiPV value 1');
+    const found = extractPuzzles();
+    if(cancelled){
+      pzSetMsg('Stopped. ' + (found ? 'Kept ' + found + ' puzzle' + (found === 1 ? '' : 's') + ' from the part that finished.'
+                                    : 'Nothing found in the part that finished.'), found ? 'ok' : '');
+    }else if(found){
+      pzSetMsg('Found ' + found + ' puzzle' + (found === 1 ? '' : 's') + ' from your games.', 'ok');
+    }else{
+      pzSetMsg('No clear mistakes found — try more games, or a faster time control where blunders are more common.', '');
+    }
+    renderPuzzleList();
+    if(found) openPuzzle(puzzles.length - found);
+    if(engine) switchEngineVariant(); // hand the engine back to the app's own mode
+  }
+
+  function extractPuzzles(){
+    let added = 0;
+    const seen = {};
+    puzzles.forEach(p => { seen[p.fen] = true; });
+    pzGames.forEach((g, gi) => {
+      const ev = pzEvals[gi] || {};
+      const last = Math.min(g.ucis.length, PZ_MAX_PLY);
+      for(let ply = PZ_SKIP_OPENING; ply < last; ply++){
+        const mover = ply % 2 === 0 ? 'w' : 'b';
+        if(mover !== g.userColor) continue;
+        const a = ev[ply], b = ev[ply + 1];
+        if(!a || !b || !a.pv) continue;
+        const before = mover === 'w' ? a.cp : -a.cp;   // flip to the player's own point of view
+        const after  = mover === 'w' ? b.cp : -b.cp;
+        if(Math.abs(before) > PZ_DECIDED) continue;    // already decided — nothing to learn
+        if(before - after < PZ_LOSS) continue;         // not a real mistake
+        if(a.gap !== null && a.gap < PZ_UNIQUE_GAP) continue; // several moves equally good
+        if(a.pv === g.ucis[ply]) continue;             // they already found the best move
+        const t = new Chess();
+        let ok = true;
+        for(let k = 0; k < ply; k++){ if(!t.move(g.sans[k], { sloppy: true })){ ok = false; break; } }
+        if(!ok) continue;
+        const fen = t.fen();
+        if(seen[fen]) continue;
+        const solution = pvMoveToSan(fen, a.pv);
+        if(!solution || solution === a.pv) continue;   // couldn't turn the engine move into real notation
+        seen[fen] = true;
+        puzzles.push({
+          id: 'z_' + Date.now() + '_' + Math.floor(Math.random() * 10000),
+          fen: fen, userColor: mover, solution: solution,
+          played: g.sans[ply] || '?',
+          loss: Math.round(before - after),
+          url: g.url, opponent: g.opponent, date: g.date,
+          moveNo: Math.floor(ply / 2) + 1,
+          solved: false, createdAt: Date.now()
+        });
+        added++;
+      }
+    });
+    if(added) savePuzzles();
+    return added;
+  }
+
+  // ---- Solving ----
+  function openPuzzle(i){
+    if(i < 0 || i >= puzzles.length) return;
+    pzIndex = i;
+    const p = puzzles[i];
+    pzChess = new Chess(p.fen);
+    pzSel = null; pzTargets = []; pzSolved = false;
+    pzSolveWrap.style.display = 'block';
+    pzPromptEl.textContent = (p.userColor === 'w' ? 'White' : 'Black') + ' to play — you played ' +
+      p.played + ' here. Find the better move.';
+    pzFeedbackEl.textContent = ''; pzFeedbackEl.className = 'form-msg';
+    pzMetaEl.innerHTML = 'Move ' + p.moveNo + ' vs ' + escapeHtml(p.opponent) +
+      ' · cost ' + (p.loss / 100).toFixed(1) + ' pawns' +
+      (p.url ? ' · <a href="' + escapeHtml(p.url) + '" target="_blank" rel="noopener" style="color:var(--brass);">view game</a>' : '');
+    renderPuzzleBoard();
+    renderPuzzleList();
+  }
+
+  function renderPuzzleBoard(){
+    const container = $('pzBoard');
+    if(!pzChess){ container.innerHTML = ''; return; }
+    const arr = pzChess.board();
+    const flip = puzzles[pzIndex] && puzzles[pzIndex].userColor === 'b';
+    const rowOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    const colOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    container.innerHTML = '';
+    rowOrder.forEach((r, ri) => {
+      colOrder.forEach((c, ci) => {
+        const isLight = (r + c) % 2 === 0;
+        const sqName = FILES[c] + (8 - r);
+        const cell = arr[r][c];
+        const div = document.createElement('div');
+        div.className = 'sq ' + (isLight ? 'light' : 'dark');
+        div.dataset.square = sqName;
+        if(ci === 0){ const rl=document.createElement('span'); rl.className='coord rank'; rl.textContent=8-r; div.appendChild(rl); }
+        if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
+        if(cell){ const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p); }
+        if(pzSel === sqName) div.classList.add('selected');
+        const target = pzTargets.find(t => t.to === sqName);
+        if(target){ const mk=document.createElement('span'); mk.className = cell ? 'ring' : 'dot'; div.appendChild(mk); }
+        const clickable = !pzSolved && ((cell && cell.color === pzChess.turn()) || target);
+        if(clickable){
+          div.classList.add('selectable'); div.tabIndex = 0;
+          div.addEventListener('click', () => onPuzzleSquareClick(sqName));
+          div.addEventListener('keydown', (e) => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); onPuzzleSquareClick(sqName);} });
+        }
+        container.appendChild(div);
+      });
+    });
+  }
+
+  function onPuzzleSquareClick(sqName){
+    if(!pzChess || pzSolved) return;
+    const reselect = () => {
+      const cell = pzChess.get(sqName);
+      if(cell && cell.color === pzChess.turn()){
+        pzSel = sqName; pzTargets = pzChess.moves({ square: sqName, verbose: true }); renderPuzzleBoard();
+      }
+    };
+    if(pzSel === null){ reselect(); return; }
+    if(sqName === pzSel){ pzSel = null; pzTargets = []; renderPuzzleBoard(); return; }
+    const target = pzTargets.find(t => t.to === sqName);
+    if(!target){ reselect(); return; }
+    const p = puzzles[pzIndex];
+    const res = pzChess.move({ from: pzSel, to: sqName, promotion: 'q' });
+    pzSel = null; pzTargets = [];
+    if(!res){ renderPuzzleBoard(); return; }
+    if(stripSym(res.san) === stripSym(p.solution)){
+      pzSolved = true;
+      if(!p.solved){ p.solved = true; savePuzzles(); }
+      pzFeedbackEl.textContent = 'Correct — ' + p.solution + ' was the move.';
+      pzFeedbackEl.className = 'form-msg ok';
+      renderPuzzleList();
+    }else{
+      pzChess.undo();
+      pzFeedbackEl.textContent = res.san + ' isn\'t it — try again.';
+      pzFeedbackEl.className = 'form-msg err';
+    }
+    renderPuzzleBoard();
+  }
+
+  function renderPuzzleList(){
+    if(!puzzles.length){
+      pzListEl.innerHTML = '<div class="empty">No puzzles yet — import some games above.</div>';
+      return;
+    }
+    pzListEl.innerHTML = '';
+    puzzles.forEach((p, i) => {
+      const row = document.createElement('div');
+      row.className = 'pz-item' + (i === pzIndex ? ' active' : '');
+      row.innerHTML = '<div><div class="pz-name">' + (p.solved ? '<span class="pz-tick">✓</span> ' : '') +
+        'Move ' + p.moveNo + ' vs ' + escapeHtml(p.opponent) + '</div>' +
+        '<div class="pz-sub">you played ' + escapeHtml(p.played) + ' · cost ' +
+        (p.loss / 100).toFixed(1) + ' pawns</div></div>';
+      row.addEventListener('click', () => openPuzzle(i));
+      pzListEl.appendChild(row);
+    });
+  }
+
+  // ---- Puzzle button wiring ----
+  pzFindBtn.addEventListener('click', pzFind);
+  pzCancelBtn.addEventListener('click', () => { pzCancel = true; pzSetMsg('Stopping after this position…', ''); });
+  $('pzSolutionBtn').addEventListener('click', () => {
+    if(pzIndex < 0) return;
+    pzFeedbackEl.textContent = 'The move was ' + puzzles[pzIndex].solution + '.';
+    pzFeedbackEl.className = 'form-msg';
+  });
+  $('pzNextBtn').addEventListener('click', () => { if(puzzles.length) openPuzzle((pzIndex + 1) % puzzles.length); });
+  $('pzPrevBtn').addEventListener('click', () => { if(puzzles.length) openPuzzle((pzIndex - 1 + puzzles.length) % puzzles.length); });
+  $('pzClearBtn').addEventListener('click', () => {
+    if(!puzzles.length) return;
+    if(!confirm('Delete all ' + puzzles.length + ' saved puzzles?')) return;
+    puzzles = []; savePuzzles(); pzIndex = -1; pzChess = null;
+    pzSolveWrap.style.display = 'none';
+    renderPuzzleList(); pzSetMsg('', '');
+  });
+  try{
+    const f = JSON.parse(localStorage.getItem(PZ_FORM_KEY) || 'null');
+    if(f){
+      if(f.site) $('pzSite').value = f.site;
+      if(f.user) $('pzUser').value = f.user;
+      if(f.speed) $('pzSpeed').value = f.speed;
+      if(f.max) $('pzMax').value = String(f.max);
+    }
+  }catch(e){}
+
+  // ============================================================
+  // 10. FOCUS MODE — fullscreen practice view
   // ============================================================
   function setFocusMode(on){
     wrapEl.classList.toggle('focus-mode', on);
@@ -1488,7 +2061,7 @@
   });
 
   // ============================================================
-  // 10. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
+  // 11. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
   // ============================================================
   document.addEventListener('keydown', (e) => {
     if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -1514,7 +2087,7 @@
   });
 
   // ============================================================
-  // 11. ERROR REPORTING — Sentry manual "Report an issue" button
+  // 12. ERROR REPORTING — Sentry manual "Report an issue" button
   // ============================================================
   const reportBtn = $('reportBtn');
   reportBtn.addEventListener('click', () => {
@@ -1535,7 +2108,7 @@
   });
 
   // ============================================================
-  // 12. INIT
+  // 13. INIT
   // ============================================================
   async function init(){
     await loadDb();
@@ -1547,6 +2120,7 @@
     const resumed = restoreSession();
     if(!resumed && db.drills.length) setStatus('Shuffle lines to begin.', 'info');
     renderProgressNote();
+    renderPuzzleList();
     applyGameMode();
   }
   init();
