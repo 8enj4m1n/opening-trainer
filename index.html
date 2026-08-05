@@ -153,8 +153,12 @@
   .folder-group summary::after{content:'▸';color:var(--muted);font-size:13px;transition:transform .15s;}
   .folder-group[open] summary::after{transform:rotate(90deg);}
   .folder-group summary:hover{color:var(--brass);}
+  .folder-group summary > span{flex:1;}
   .folder-group .drill-list{padding:12px;}
   .folder-group.drag-over{outline:2px dashed var(--brass);outline-offset:-2px;}
+  .folder-group.other-mode{opacity:.55;}
+  .folder-group.other-mode summary{font-style:italic;}
+  .folder-mode-btn{padding:3px 8px;font-size:11px;margin-left:8px;}
   .ungrouped-drop{display:flex;flex-direction:column;gap:10px;min-height:12px;border-radius:8px;}
   .ungrouped-drop.drag-over{outline:2px dashed var(--brass);outline-offset:4px;}
 
@@ -260,10 +264,7 @@
           <button data-filter="w">Playing White</button>
           <button data-filter="b">Playing Black</button>
         </div>
-        <div class="field" style="margin-bottom:14px;">
-          <label for="folderFilter">Opening</label>
-          <select id="folderFilter"><option value="all">All openings</option></select>
-        </div>
+        <div class="filter-row" id="folderFilter"></div>
         <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">Scoresheet</div>
         <div class="ledger" id="ledger"><div class="empty" style="border:none;">Nothing played yet</div></div>
       </div>
@@ -412,6 +413,7 @@
   const SESSION_KEY = 'repertoire-session';    // in-progress practice position
   const DRAFT_KEY = 'repertoire-draft';        // unsaved editor line
   const GAME_MODE_KEY = 'repertoire-game-mode'; // 'three-check' | 'standard'
+  const PRACTICE_FOLDERS_KEY = 'repertoire-practice-folders'; // which openings are selected
   const FILES = ['a','b','c','d','e','f','g','h'];
   const PIECE_GLYPH = {
     w:{p:'♙',n:'♘',b:'♗',r:'♖',q:'♕',k:'♔'},
@@ -560,14 +562,39 @@
     }catch(e){ db = { drills: [], folders: [] }; }
     if(!db.drills) db.drills = [];
     if(!db.folders) db.folders = [];
+    // Folders used to be plain name strings; they now carry the game mode they belong to.
+    // Migrate by name, since folders made before this existed have no other clue. Idempotent:
+    // already-migrated objects pass straight through.
+    db.folders = db.folders.map(f => typeof f === 'string'
+      ? { name: f, mode: /3\s*check|three\s*check/i.test(f) ? 'three-check' : 'standard' }
+      : f);
+  }
+
+  // A folder referenced only by a drill (never explicitly created) has no stored mode —
+  // treat it as belonging to whatever mode is active so its drills stay reachable.
+  function folderMode(name){
+    const rec = db.folders.find(f => f.name === name);
+    return rec ? rec.mode : gameMode;
   }
 
   // Union of explicitly-created folders and any folder names already used on a drill
   // (so nothing is ever lost even if a drill references a folder that was renamed away).
-  function allFolders(){
-    const set = new Set(db.folders);
+  // Returns names, not records, so existing callers are unaffected.
+  function allFolders(visibleOnly){
+    const set = new Set(db.folders.map(f => f.name));
     db.drills.forEach(d => { if(d.folder) set.add(d.folder); });
-    return [...set].sort((a,b) => a.localeCompare(b));
+    let out = [...set];
+    if(visibleOnly) out = out.filter(n => folderMode(n) === gameMode);
+    return out.sort((a,b) => a.localeCompare(b));
+  }
+
+  function setFolderMode(name, mode){
+    const rec = db.folders.find(f => f.name === name);
+    if(rec) rec.mode = mode; else db.folders.push({ name: name, mode: mode });
+    saveDb();
+    renderLibraryTab();
+    populateFolderSelects();
+    renderProgressNote();
   }
   async function saveDb(){
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
@@ -590,7 +617,8 @@
   let legalTargets = [];
   let wrongAttempts = 0;
   let practiceFilter = 'all';
-  let practiceFolder = 'all';
+  let practiceFolders = [];   // empty means "every visible folder"
+  try{ practiceFolders = JSON.parse(localStorage.getItem(PRACTICE_FOLDERS_KEY) || '[]') || []; }catch(e){ practiceFolders = []; }
   let awaitingGoBack = false;
   let reviewOffset = 0; // 0 = live position; >0 = viewing that many plies back (never past moveIndex, so it can't reveal unplayed moves)
   let drillFinished = false;
@@ -722,10 +750,16 @@
 
   // ---- Filters & progress note ----
   function eligibleDrills(){
-    return db.drills.filter(d =>
-      (practiceFilter === 'all' || d.userColor === practiceFilter) &&
-      (practiceFolder === 'all' || (d.folder || '') === practiceFolder)
-    );
+    return db.drills.filter(d => {
+      if(practiceFilter !== 'all' && d.userColor !== practiceFilter) return false;
+      if(d.folder && folderMode(d.folder) !== gameMode) return false;   // belongs to the other game mode
+      if(practiceFolders.length && practiceFolders.indexOf(d.folder || '') === -1) return false;
+      return true;
+    });
+  }
+
+  function savePracticeFolders(){
+    try{ localStorage.setItem(PRACTICE_FOLDERS_KEY, JSON.stringify(practiceFolders)); }catch(e){}
   }
 
   function renderProgressNote(){
@@ -765,6 +799,12 @@
     modeBtn.textContent = 'Mode: ' + (gameMode === 'three-check' ? 'Three-check' : 'Standard chess');
     checksBadgeEl.style.display = gameMode === 'three-check' ? '' : 'none';
     if(currentDrill) renderBoard();
+    // A challenge queue holds bare drill ids, so a mode flip could otherwise keep serving
+    // drills from folders that are no longer visible.
+    if(challengeQueue !== null){ challengeQueue = null; challengeTotal = 0; challengeDone = 0; }
+    populateFolderSelects();
+    renderLibraryTab();
+    renderProgressNote();
     switchEngineVariant();
   }
   modeBtn.addEventListener('click', () => {
@@ -793,6 +833,8 @@
     if(!rec || !rec.drillId) return false;
     const drill = db.drills.find(d => d.id === rec.drillId);
     if(!drill){ clearSession(); return false; }
+    // Don't resume a drill whose folder belongs to the other game mode.
+    if(drill.folder && folderMode(drill.folder) !== gameMode){ clearSession(); return false; }
 
     currentDrill = drill;
     chess.reset();
@@ -839,7 +881,7 @@
   function shuffleDrill(){
     challengeQueue = null; challengeTotal = 0; challengeDone = 0; // manual shuffle always exits a running challenge
     const pool = eligibleDrills();
-    if(pool.length === 0){ setStatus('No lines match that filter yet. Add one in the library.', 'info'); renderProgressNote(); return; }
+    if(pool.length === 0){ setStatus('No lines match the selected openings, colour and game mode. Try selecting more openings, or switch game mode.', 'info'); renderProgressNote(); return; }
     let pick = pool[Math.floor(Math.random() * pool.length)];
     if(pool.length > 1 && currentDrill && pick.id === currentDrill.id){ pick = pool[(pool.indexOf(pick) + 1) % pool.length]; }
     startDrill(pick);
@@ -847,7 +889,7 @@
 
   function startChallenge(){
     const pool = eligibleDrills();
-    if(pool.length === 0){ setStatus('No lines match that filter yet. Add one in the library.', 'info'); return; }
+    if(pool.length === 0){ setStatus('No lines match the selected openings, colour and game mode. Try selecting more openings, or switch game mode.', 'info'); return; }
     challengeQueue = shuffleArray(pool.map(d => d.id));
     challengeTotal = challengeQueue.length;
     challengeDone = 0;
@@ -857,7 +899,7 @@
   // "Next drill" steps sequentially through the library in normal practice — "Shuffle lines" is the random one.
   function nextSequentialDrill(){
     const pool = eligibleDrills();
-    if(pool.length === 0){ setStatus('No lines match that filter yet. Add one in the library.', 'info'); renderProgressNote(); return; }
+    if(pool.length === 0){ setStatus('No lines match the selected openings, colour and game mode. Try selecting more openings, or switch game mode.', 'info'); renderProgressNote(); return; }
     const curIdx = currentDrill ? pool.findIndex(d => d.id === currentDrill.id) : -1;
     startDrill(pool[(curIdx + 1) % pool.length]);
   }
@@ -1024,28 +1066,57 @@
   const folderFilterEl = $('folderFilter');
   const fFolderEl = $('fFolder');
 
+  // Only folders belonging to the current game mode are offered, both for practising and
+  // for filing a new drill. Practice selection is multi-choice: several openings at once.
   function populateFolderSelects(){
-    const folders = allFolders();
-    const options = folders.map(f => '<option value="'+escapeHtml(f)+'">'+escapeHtml(f)+'</option>').join('');
-    const prevFilter = folderFilterEl.value || 'all';
-    folderFilterEl.innerHTML = '<option value="all">All openings</option>' + options;
-    folderFilterEl.value = folders.includes(prevFilter) || prevFilter === 'all' ? prevFilter : 'all';
-    practiceFolder = folderFilterEl.value;
+    const folders = allFolders(true);
+
+    // Drop any selected folder that the current mode can no longer see.
+    const before = practiceFolders.length;
+    practiceFolders = practiceFolders.filter(n => folders.indexOf(n) !== -1 || n === '');
+    if(practiceFolders.length !== before) savePracticeFolders();
+
+    folderFilterEl.innerHTML = '';
+    const addBtn = (label, value, active) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.dataset.folder = value;
+      if(active) b.classList.add('active');
+      folderFilterEl.appendChild(b);
+    };
+    addBtn('All openings', ' all', practiceFolders.length === 0);
+    folders.forEach(f => addBtn(f, f, practiceFolders.indexOf(f) !== -1));
+    if(db.drills.some(d => !d.folder)) addBtn('Uncategorized', '', practiceFolders.indexOf('') !== -1);
 
     const prevEdit = fFolderEl.value || '';
-    fFolderEl.innerHTML = '<option value="">Uncategorized</option>' + options;
-    fFolderEl.value = folders.includes(prevEdit) ? prevEdit : '';
+    fFolderEl.innerHTML = '<option value="">Uncategorized</option>' +
+      folders.map(f => '<option value="'+escapeHtml(f)+'">'+escapeHtml(f)+'</option>').join('');
+    fFolderEl.value = folders.indexOf(prevEdit) !== -1 ? prevEdit : '';
   }
 
-  folderFilterEl.addEventListener('change', () => {
-    practiceFolder = folderFilterEl.value;
+  // Unlike the colour row, this one toggles — you can practise several openings together.
+  // Matching the colour filter's precedent, changing it never disturbs the drill in progress.
+  folderFilterEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-folder]');
+    if(!btn) return;
+    const val = btn.dataset.folder;
+    if(val === ' all'){
+      practiceFolders = [];
+    }else{
+      const at = practiceFolders.indexOf(val);
+      if(at === -1) practiceFolders.push(val); else practiceFolders.splice(at, 1);
+    }
+    savePracticeFolders();
+    populateFolderSelects();
     renderProgressNote();
   });
 
   $('newFolderBtn').addEventListener('click', () => {
     const name = (prompt('Name this folder (opening):') || '').trim();
     if(!name) return;
-    if(!db.folders.includes(name)) db.folders.push(name);
+    // A new folder belongs to whichever game mode you're in right now.
+    if(!db.folders.some(f => f.name === name)) db.folders.push({ name: name, mode: gameMode });
     saveDb();
     populateFolderSelects();
     fFolderEl.value = name;
@@ -1151,9 +1222,27 @@
 
     Object.keys(grouped).sort((a,b) => a.localeCompare(b)).forEach(folderName => {
       const drills = grouped[folderName];
-      const details = document.createElement('details'); details.className = 'folder-group';
+      const fMode = folderMode(folderName);
+      const otherMode = fMode !== gameMode;
+      const details = document.createElement('details');
+      details.className = 'folder-group' + (otherMode ? ' other-mode' : '');
       const summary = document.createElement('summary');
-      summary.textContent = folderName + ' (' + drills.length + ')';
+      const label = document.createElement('span');
+      label.textContent = folderName + ' (' + drills.length + ')' +
+        (otherMode ? ' — ' + (fMode === 'three-check' ? 'three-check' : 'standard') + ' only' : '');
+      summary.appendChild(label);
+      // The Library is the management view, so other-mode folders stay listed here even
+      // though they're hidden everywhere else — otherwise a mis-filed folder is unfixable.
+      const swap = document.createElement('button');
+      swap.className = 'ghost folder-mode-btn';
+      swap.type = 'button';
+      swap.textContent = otherMode ? 'Move here' : 'Send to ' + (gameMode === 'three-check' ? 'standard' : 'three-check');
+      swap.title = 'Which game mode this opening belongs to';
+      swap.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        setFolderMode(folderName, otherMode ? gameMode : (gameMode === 'three-check' ? 'standard' : 'three-check'));
+      });
+      summary.appendChild(swap);
       details.appendChild(summary);
       const innerList = document.createElement('div'); innerList.className = 'drill-list';
       drills.forEach(drill => innerList.appendChild(buildDrillItem(drill)));
@@ -1218,7 +1307,7 @@
     editSelected = null; editLegalTargets = [];
     if(rec.fName) $('fName').value = rec.fName;
     if(rec.fSide === 'w' || rec.fSide === 'b'){ document.querySelector('input[name=fSide][value="'+rec.fSide+'"]').checked = true; }
-    if(rec.fFolder && allFolders().includes(rec.fFolder)) fFolderEl.value = rec.fFolder;
+    if(rec.fFolder && allFolders(true).includes(rec.fFolder)) fFolderEl.value = rec.fFolder;
     $('editMsg').textContent = 'Restored your unsaved draft.';
     $('editMsg').className = 'form-msg ok';
   }
@@ -1329,7 +1418,15 @@
     editingId = drill.id;
     $('fName').value = drill.name;
     document.querySelector('input[name=fSide][value="'+drill.userColor+'"]').checked = true;
-    fFolderEl.value = allFolders().includes(drill.folder) ? drill.folder : '';
+    // Editing a drill filed under another mode's folder: keep that folder selectable so
+    // saving doesn't silently strip it, but mark it so the mismatch is visible.
+    if(drill.folder && !Array.prototype.some.call(fFolderEl.options, o => o.value === drill.folder)){
+      const opt = document.createElement('option');
+      opt.value = drill.folder;
+      opt.textContent = drill.folder + ' (other game mode)';
+      fFolderEl.appendChild(opt);
+    }
+    fFolderEl.value = drill.folder || '';
     enterEditModeUI(drill);
     renderEditBoard(); renderEditLedger();
   }
@@ -1635,7 +1732,9 @@
   // so best moves are already waiting before you ever open a position yourself.
   function buildPrescanQueue(){
     const out = []; const seen = {};
-    db.drills.forEach(drill => {
+    // Cache keys are tagged with the game mode, so only pre-scan drills that belong to the
+    // mode the engine is currently configured for.
+    db.drills.filter(d => !d.folder || folderMode(d.folder) === gameMode).forEach(drill => {
       const t = new Chess(); const ucis = []; const checks = { w: 0, b: 0 };
       const push = () => {
         const key = t.fen() + '|' + checks.w + '+' + checks.b + '|' + gameMode;
@@ -2425,8 +2524,9 @@
   // ============================================================
   async function init(){
     await loadDb();
-    renderLibraryTab();
-    populateFolderSelects();
+    // applyGameMode() renders the folder-dependent UI, so it has to run before anything
+    // that reads it — otherwise the library and folder buttons render for the wrong mode.
+    applyGameMode();
     restoreDraft();
     renderEditBoard();
     renderEditLedger();
@@ -2434,7 +2534,6 @@
     if(!resumed && db.drills.length) setStatus('Shuffle lines to begin.', 'info');
     renderProgressNote();
     renderPuzzleList();
-    applyGameMode();
   }
   init();
 })();
