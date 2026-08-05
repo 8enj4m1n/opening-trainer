@@ -194,7 +194,10 @@
       <h1>The Ledger</h1>
       <p class="tag">Play a line out on the board to save it. Rewind and try a different reply whenever you want a second line from the same position.</p>
     </div>
-    <button class="ghost" id="reportBtn" type="button">Report an issue</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="ghost" id="soundBtn" type="button">Sound: on</button>
+      <button class="ghost" id="reportBtn" type="button">Report an issue</button>
+    </div>
   </header>
 
   <div class="layout">
@@ -387,7 +390,7 @@
   // THE LEDGER — opening repertoire trainer (three-check chess)
   //
   // Script layout:
-  //   1. CONSTANTS & UTILITIES
+  //   1. CONSTANTS, UTILITIES & SOUND
   //   2. DATABASE       — drills + folders in localStorage
   //   3. PRACTICE       — drilling saved lines on the main board
   //   4. FOLDERS        — opening groups for filtering & labelling
@@ -443,6 +446,107 @@
     if(sanMoves.length === 0) return { error: 'Enter at least one move.' };
     return { moves: sanMoves };
   }
+
+  // ---- Sound effects ----
+  // Synthesised with the Web Audio API rather than shipped as audio files: nothing extra to
+  // download, nothing that trips the page's cross-origin isolation, and no one else's samples.
+  // A piece landing on a board is a short filtered-noise transient over a low body tone, so
+  // that's what these build.
+  const SOUND_KEY = 'repertoire-sound';
+  let soundOn = true;
+  try{ soundOn = localStorage.getItem(SOUND_KEY) !== '0'; }catch(e){}
+  let audioCtx = null;
+
+  function audio(){
+    if(!soundOn) return null;
+    try{
+      if(!audioCtx){
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if(!AC) return null;
+        audioCtx = new AC();
+      }
+      // Browsers start the context suspended until a real user gesture; every sound here
+      // follows a click, so resuming on demand is enough.
+      if(audioCtx.state === 'suspended') audioCtx.resume();
+      return audioCtx;
+    }catch(e){ return null; }
+  }
+
+  function noiseBuffer(ctx, dur){
+    const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for(let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    return buf;
+  }
+
+  function sfxHit(noiseHz, q, bodyHz, dur, vol){
+    const ctx = audio();
+    if(!ctx) return;
+    const t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer(ctx, dur);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = noiseHz; bp.Q.value = q;
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(vol, t);
+    ng.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(bp); bp.connect(ng); ng.connect(ctx.destination);
+    src.start(t); src.stop(t + dur);
+
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(bodyHz, t);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(40, bodyHz * 0.55), t + dur);
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(vol * 0.7, t);
+    og.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(og); og.connect(ctx.destination);
+    osc.start(t); osc.stop(t + dur);
+  }
+
+  function sfxTone(freqs, step, dur, vol, type){
+    const ctx = audio();
+    if(!ctx) return;
+    freqs.forEach((f, i) => {
+      const t = ctx.currentTime + i * step;
+      const osc = ctx.createOscillator();
+      osc.type = type || 'sine';
+      osc.frequency.setValueAtTime(f, t);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g); g.connect(ctx.destination);
+      osc.start(t); osc.stop(t + dur + 0.02);
+    });
+  }
+
+  function sfxMove(){ sfxHit(1050, 1.1, 210, 0.075, 0.30); }
+  function sfxCapture(){ sfxHit(2300, 0.8, 160, 0.115, 0.40); }
+  function sfxCastle(){ sfxMove(); setTimeout(sfxMove, 95); }
+  function sfxCheck(){ sfxTone([880, 1245], 0.075, 0.11, 0.16); }
+  function sfxWrong(){ sfxTone([190, 140], 0.085, 0.14, 0.16, 'square'); }
+  function sfxWin(){ sfxTone([523, 659, 784, 1047], 0.085, 0.16, 0.14); }
+
+  // Picks the right sound for a chess.js move result. `board` is the game *after* the move.
+  function playMoveSound(mv, board){
+    if(!mv) return;
+    if(board && board.in_check && board.in_check()){ sfxCheck(); return; }
+    const flags = mv.flags || '';
+    if(flags.indexOf('k') >= 0 || flags.indexOf('q') >= 0){ sfxCastle(); return; }
+    if(mv.captured) sfxCapture(); else sfxMove();
+  }
+
+  const soundBtn = $('soundBtn');
+  function renderSoundBtn(){ soundBtn.textContent = 'Sound: ' + (soundOn ? 'on' : 'off'); }
+  soundBtn.addEventListener('click', () => {
+    soundOn = !soundOn;
+    try{ localStorage.setItem(SOUND_KEY, soundOn ? '1' : '0'); }catch(e){}
+    renderSoundBtn();
+    if(soundOn) sfxMove(); // instant confirmation of what you just switched on
+  });
+  renderSoundBtn();
 
   // ============================================================
   // 2. DATABASE — drills + folders persisted in localStorage
@@ -793,13 +897,15 @@
 
   function maybeAdvanceOpponent(){
     if(!currentDrill) return;
+    let lastOpponentMove = null;
     while(currentDrill && moveIndex < currentDrill.moves.length && chess.turn() !== currentDrill.userColor){
       const mover = chess.turn();
-      chess.move(currentDrill.moves[moveIndex], { sloppy: true });
+      lastOpponentMove = chess.move(currentDrill.moves[moveIndex], { sloppy: true });
       moveIndex++;
       if(chess.in_check()) registerCheck(mover);
     }
     if(!currentDrill) return;
+    playMoveSound(lastOpponentMove, chess);
     renderChecksBadge(); renderLedger(); renderBoard();
     if(moveIndex >= currentDrill.moves.length){ completeDrill(false); }
     else{ resetHint(); setStatus('Your move.', 'info'); saveSession(); }
@@ -809,6 +915,7 @@
     drillFinished = true;
     currentDrill.completed = (currentDrill.completed || 0) + 1;
     saveDb();
+    sfxWin();
     if(challengeQueue !== null) challengeDone++;
     const lead = viaThreeCheck ? 'Three-check win — ' : 'Line complete — ';
     const tail = challengeQueue !== null
@@ -846,6 +953,7 @@
     if(stripSym(result.san) !== stripSym(expected)){
       selectedSquare = null; legalTargets = []; wrongAttempts++;
       awaitingGoBack = true;
+      sfxWrong();
       setStatus('Wrong move — go back.', 'err');
       updateGoBackVisibility();
       renderLedger(); renderBoard();
@@ -853,6 +961,7 @@
     }
     selectedSquare = null; legalTargets = []; wrongAttempts = 0;
     moveIndex++;
+    playMoveSound(result, chess);
     if(chess.in_check()) registerCheck(currentDrill.userColor);
     renderChecksBadge();
     if(gameMode === 'three-check' && checksGiven[currentDrill.userColor] >= CHECKS_TO_WIN){
@@ -1180,6 +1289,7 @@
     const result = editChess.move({ from: editSelected, to: sqName, promotion: 'q' });
     if(!result) return;
     editorMoves.push(result.san);
+    playMoveSound(result, editChess);
     editRedoStack = []; // a genuinely new move invalidates whatever was undone before it
     editSelected = null; editLegalTargets = [];
     renderEditBoard(); renderEditLedger();
@@ -2141,11 +2251,13 @@
 
     if(stripSym(res.san) !== stripSym(line[pzStep])){
       pzChess.undo();
+      sfxWrong();
       pzSetStatus(res.san + ' isn\'t it — try again.', 'err');
       renderPuzzleBoard();
       return;
     }
 
+    playMoveSound(res, pzChess);
     pzStep++;
     const reply = line[pzStep];
     if(reply){
@@ -2155,7 +2267,7 @@
       renderPuzzleStepBadge();
       setTimeout(() => {
         if(pzIndex < 0 || !pzChess) return;
-        pzChess.move(reply, { sloppy: true });
+        playMoveSound(pzChess.move(reply, { sloppy: true }), pzChess);
         pzStep++;
         pzSetStatus('They played ' + reply + '. Keep going — find the next move.', 'info');
         renderPuzzleStepBadge();
@@ -2166,6 +2278,7 @@
 
     pzSolved = true;
     if(!p.solved){ p.solved = true; savePuzzles(); }
+    sfxWin();
     pzSetStatus('Solved — ' + line.join(' ') + '. ' + pzExplain(p), 'ok');
     renderPuzzleMeta(true);
     renderPuzzleStepBadge();
