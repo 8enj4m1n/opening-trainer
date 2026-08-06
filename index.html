@@ -224,6 +224,7 @@
         <button class="ghost" id="goBackBtn" style="display:none;">Go back</button>
         <button class="ghost" id="restartBtn" disabled>Restart line</button>
         <button class="ghost" id="testAllBtn" type="button">Test all drills</button>
+        <button class="ghost" id="exitChallengeBtn" type="button" style="display:none;">Exit challenge</button>
       </div>
       <div class="progress-note" id="progressNote"></div>
     </div>
@@ -640,6 +641,7 @@
   const progressNoteEl = $('progressNote');
   const shuffleBtn = $('shuffleBtn');
   const testAllBtn = $('testAllBtn');
+  const exitChallengeBtn = $('exitChallengeBtn');
   const nextBtn = $('nextBtn');
   const hintBtn = $('hintBtn');
   const goBackBtn = $('goBackBtn');
@@ -762,9 +764,23 @@
     try{ localStorage.setItem(PRACTICE_FOLDERS_KEY, JSON.stringify(practiceFolders)); }catch(e){}
   }
 
+  // While a challenge is running, "Shuffle lines" and "Test all drills" are hidden: both
+  // silently abandon the queue, and having them sitting next to "Next drill" made it far
+  // too easy to kill a challenge by accident. Driven from renderProgressNote() because
+  // that already runs at every point the challenge state can change, so the two can't drift.
+  function updateChallengeControls(){
+    const running = challengeQueue !== null;
+    shuffleBtn.style.display = running ? 'none' : 'inline-block';
+    testAllBtn.style.display = running ? 'none' : 'inline-block';
+    exitChallengeBtn.style.display = running ? 'inline-block' : 'none';
+    nextBtn.textContent = running ? 'Next in challenge →' : 'Next drill →';
+  }
+
   function renderProgressNote(){
+    updateChallengeControls();
     if(challengeQueue !== null){
-      progressNoteEl.textContent = 'Challenge: ' + challengeDone + ' of ' + challengeTotal + ' done — ' + (challengeTotal - challengeDone) + ' left';
+      progressNoteEl.textContent = 'Challenge: ' + challengeDone + ' of ' + challengeTotal +
+        ' done — ' + (challengeTotal - challengeDone) + ' left (drills come in random order)';
       return;
     }
     const pool = eligibleDrills();
@@ -961,7 +977,9 @@
     if(challengeQueue !== null) challengeDone++;
     const lead = viaThreeCheck ? 'Three-check win — ' : 'Line complete — ';
     const tail = challengeQueue !== null
-      ? (challengeQueue.length > 0 ? ' Press Next to continue the challenge.' : ' That was the last one — press Next to finish the challenge.')
+      ? (challengeQueue.length > 0
+          ? ' Press "Next in challenge" for the next one (' + challengeQueue.length + ' to go).'
+          : ' That was the last one — press "Next in challenge" to finish.')
       : ' Press Next for another.';
     setStatus(lead + 'that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '.' + tail, 'ok');
     updateNextVisibility(); updateGoBackVisibility();
@@ -1052,6 +1070,11 @@
   shuffleBtn.addEventListener('click', shuffleDrill);
   nextBtn.addEventListener('click', advanceDrill);
   testAllBtn.addEventListener('click', startChallenge);
+  exitChallengeBtn.addEventListener('click', () => {
+    challengeQueue = null; challengeTotal = 0; challengeDone = 0;
+    setStatus('Challenge ended. Shuffle or pick a line to carry on practising.', 'info');
+    renderProgressNote();
+  });
   $('colorFilter').addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-filter]');
     if(!btn) return;
