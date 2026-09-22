@@ -190,6 +190,13 @@
   .tree-group .tg-sub{color:var(--muted);font-size:11.5px;font-family:'JetBrains Mono',monospace;margin-top:3px;}
   #treeOptions{gap:8px;}
   #treeLine{font-family:'JetBrains Mono',monospace;line-height:1.7;}
+  #treeDiagram{max-height:460px;overflow:auto;border:1px solid var(--line);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12.5px;}
+  #treeDiagram:empty{display:none;}
+  .tree-row{padding:3px 8px;cursor:pointer;white-space:nowrap;border-left:3px solid transparent;}
+  .tree-row:hover{background:var(--panel-2);}
+  .tree-row.on-path{color:var(--brass);border-left-color:rgba(201,154,74,.45);}
+  .tree-row.current{background:rgba(201,154,74,.18);color:var(--brass);font-weight:700;border-left-color:var(--brass);}
+  .tree-row .tr-end{color:var(--felt);}
 
   /* Edit-mode banner & editor board sizing */
   .edit-banner{background:rgba(201,154,74,.12);border:1px solid var(--brass);color:var(--brass);padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
@@ -430,6 +437,8 @@
       <div id="tab-tree" style="display:none;">
         <p class="hint" style="margin-bottom:14px;">Every line you've saved in an opening, merged into one tree. Each opening gets a tree per colour you play it with. Walk down it move by move — this view never changes your drills.</p>
         <div id="treeList"></div>
+        <div style="font-size:12.5px;color:var(--muted);margin:16px 0 8px;" id="treeDiagramLabel"></div>
+        <div id="treeDiagram"></div>
       </div>
     </div>
   </div>
@@ -2778,6 +2787,49 @@
     });
   }
 
+  // The whole tree as an indented, clickable outline next to the board: the board shows one
+  // position, this shows where that position sits in the repertoire. Clicking a row jumps
+  // the board straight to it.
+  function renderTreeDiagram(){
+    const el = $('treeDiagram'), label = $('treeDiagramLabel');
+    if(!treeRoot){ el.innerHTML = ''; label.textContent = ''; return; }
+    label.textContent = 'Full tree — click any move to jump there';
+    el.innerHTML = '';
+    let currentRow = null;
+
+    const walk = (node, path, depth) => {
+      node.children.forEach(child => {
+        const p = path.concat([child]);
+        const row = document.createElement('div');
+        row.className = 'tree-row';
+        // Node objects are unique, so identity says whether this row is on the walked path.
+        if(treePath.length >= p.length && treePath[p.length - 1] === child){
+          row.classList.add(treePath.length === p.length ? 'current' : 'on-path');
+          if(treePath.length === p.length) currentRow = row;
+        }
+        row.style.paddingLeft = (Math.min(depth, 14) * 13 + 8) + 'px';
+        const ply = p.length - 1;
+        const num = (Math.floor(ply / 2) + 1) + (ply % 2 === 0 ? '. ' : '… ');
+        row.textContent = num + child.move + (child.lines > 1 ? '  (' + child.lines + ')' : '');
+        if(child.ends.length){
+          const end = document.createElement('span');
+          end.className = 'tr-end';
+          end.textContent = '  ■';
+          end.title = 'Line ends here: ' + child.ends.join(', ');
+          row.appendChild(end);
+        }
+        row.addEventListener('click', () => { treePath = p; renderTreeNode(); });
+        el.appendChild(row);
+        walk(child, p, depth + 1);
+      });
+    };
+    walk(treeRoot, [], 0);
+
+    if(currentRow && currentRow.scrollIntoView){
+      currentRow.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
   function renderTreeNode(){
     if(treeFolder === null || !treeRoot){
       treeTitleEl.textContent = 'No opening picked';
@@ -2786,8 +2838,9 @@
       treeStatusEl.className = 'status info';
       treeOptionsEl.innerHTML = '';
       treeLineEl.textContent = '';
-      treeChess = null;
+      treeChess = new Chess(); // keep a board on screen rather than an empty frame
       renderTreeBoard();
+      renderTreeDiagram();
       return;
     }
 
@@ -2796,7 +2849,9 @@
 
     treeTitleEl.textContent = treeFolder || 'Uncategorized';
     treeSideBadgeEl.textContent = 'as ' + (treeColor === 'w' ? 'White' : 'Black');
-    treeLineEl.textContent = treeLineText();
+    treeLineEl.textContent = treeLineText() || 'Starting position';
+    renderTreeBoard();
+    renderTreeDiagram();
 
     const node = treeNode();
     const yourMove = treeChess.turn() === treeColor;
