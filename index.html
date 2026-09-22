@@ -903,13 +903,35 @@
     startDrill(pick);
   }
 
+  // Takes the next id off the challenge queue and resolves it to a drill, skipping ids
+  // whose drill has since been deleted. Returns null once the queue is exhausted.
+  //
+  // The shift MUST happen here, never inside a find() predicate: a predicate runs once per
+  // element scanned, so shifting in there drains the whole queue during a single lookup.
+  function nextChallengeDrill(){
+    while(challengeQueue && challengeQueue.length){
+      const wantedId = challengeQueue.shift();
+      const drill = db.drills.find(d => d.id === wantedId);
+      if(drill) return drill;
+    }
+    return null;
+  }
+
+  function endChallenge(message){
+    if(message) setStatus(message, 'ok');
+    challengeQueue = null; challengeTotal = 0; challengeDone = 0;
+    renderProgressNote();
+  }
+
   function startChallenge(){
     const pool = eligibleDrills();
     if(pool.length === 0){ setStatus('No lines match the selected openings, colour and game mode. Try selecting more openings, or switch game mode.', 'info'); return; }
     challengeQueue = shuffleArray(pool.map(d => d.id));
     challengeTotal = challengeQueue.length;
     challengeDone = 0;
-    startDrill(db.drills.find(d => d.id === challengeQueue.shift()));
+    const first = nextChallengeDrill();
+    if(!first){ endChallenge(null); return; }
+    startDrill(first);
   }
 
   // "Next drill" steps sequentially through the library in normal practice — "Shuffle lines" is the random one.
@@ -923,14 +945,9 @@
   // Advances Next-drill flow: continues a running challenge queue if there is one, otherwise steps to the next drill in order.
   function advanceDrill(){
     if(challengeQueue !== null){
-      if(challengeQueue.length === 0){
-        setStatus('Challenge complete — ' + challengeDone + ' of ' + challengeTotal + ' lines. Nice work.', 'ok');
-        challengeQueue = null; challengeTotal = 0; challengeDone = 0;
-        renderProgressNote();
-        return;
-      }
-      const drill = db.drills.find(d => d.id === challengeQueue.shift());
-      if(drill) startDrill(drill); else advanceDrill();
+      const drill = nextChallengeDrill();
+      if(drill){ startDrill(drill); return; }
+      endChallenge('Challenge complete — ' + challengeDone + ' of ' + challengeTotal + ' lines. Nice work.');
       return;
     }
     nextSequentialDrill();
@@ -1071,9 +1088,8 @@
   nextBtn.addEventListener('click', advanceDrill);
   testAllBtn.addEventListener('click', startChallenge);
   exitChallengeBtn.addEventListener('click', () => {
-    challengeQueue = null; challengeTotal = 0; challengeDone = 0;
+    endChallenge(null);
     setStatus('Challenge ended. Shuffle or pick a line to carry on practising.', 'info');
-    renderProgressNote();
   });
   $('colorFilter').addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-filter]');
