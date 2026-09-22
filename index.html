@@ -281,6 +281,14 @@
       </div>
 
       <div id="tab-library" style="display:none;">
+        <div class="filter-row" id="libColorFilter">
+          <button class="active" data-libcolor="all" type="button">All lines</button>
+          <button data-libcolor="w" type="button">Playing White</button>
+          <button data-libcolor="b" type="button">Playing Black</button>
+        </div>
+        <div class="field">
+          <input type="text" id="libSearch" placeholder="Search lines by name…">
+        </div>
         <div class="drill-list" id="drillList"></div>
       </div>
 
@@ -1341,17 +1349,49 @@
 
   // Groups drills by folder — each folder is a collapsible section you open to pick a line from;
   // drills with no folder are listed plainly underneath, ungrouped.
+  // Library view filters. Unlike the practice filters these only change what you're looking
+  // at — they never affect which drills practice or a challenge will serve.
+  let libraryColor = 'all';
+  let librarySearch = '';
+
+  $('libColorFilter').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-libcolor]');
+    if(!btn) return;
+    libraryColor = btn.dataset.libcolor;
+    [...$('libColorFilter').children].forEach(b => b.classList.toggle('active', b === btn));
+    renderLibraryTab();
+  });
+  $('libSearch').addEventListener('input', () => {
+    librarySearch = $('libSearch').value;
+    renderLibraryTab();
+  });
+
+  function libraryDrills(){
+    const q = librarySearch.trim().toLowerCase();
+    return db.drills.filter(d => {
+      if(libraryColor !== 'all' && d.userColor !== libraryColor) return false;
+      if(q && (d.name || '').toLowerCase().indexOf(q) === -1) return false;
+      return true;
+    });
+  }
+
   function renderLibraryTab(){
     const list = $('drillList');
     if(db.drills.length === 0){
       list.innerHTML = '<div class="empty">No lines saved yet. Add one in the Add / edit tab by playing it out on the board.</div>';
       return;
     }
+    const visible = libraryDrills();
+    if(visible.length === 0){
+      list.innerHTML = '<div class="empty">No lines match this filter. ' +
+        escapeHtml(String(db.drills.length)) + ' saved in total.</div>';
+      return;
+    }
     list.innerHTML = '';
 
     const grouped = {};
     const ungrouped = [];
-    db.drills.forEach(drill => {
+    visible.forEach(drill => {
       if(drill.folder) (grouped[drill.folder] = grouped[drill.folder] || []).push(drill);
       else ungrouped.push(drill);
     });
