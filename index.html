@@ -83,6 +83,15 @@
   .check-count{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#fff;text-shadow:0 0 3px #000,0 0 3px #000,0 1px 2px #000;font-family:'JetBrains Mono',monospace;font-size:min(3.4vw,22px);font-weight:700;z-index:2;pointer-events:none;}
   .progress-note{font-size:12px;color:var(--muted);margin-top:8px;}
 
+  /* End-of-challenge report */
+  .challenge-report{margin-top:14px;border:1px solid var(--brass);border-radius:8px;padding:14px 16px;background:rgba(201,154,74,.08);}
+  .challenge-report .cr-score{font-family:'Fraunces',serif;font-size:19px;font-weight:600;color:var(--brass);}
+  .challenge-report .cr-sub{font-size:12.5px;color:var(--muted);margin-top:4px;}
+  .challenge-report .cr-missed{list-style:none;margin:10px 0 0;padding:0;}
+  .challenge-report .cr-missed li{font-size:13px;padding:5px 0;border-top:1px solid var(--line);}
+  .challenge-report .cr-missed li:first-child{border-top:none;}
+  .challenge-report .cr-actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;}
+
   /* Status line under the board */
   .status{margin-top:14px;min-height:24px;font-size:14px;}
   .status.ok{color:var(--felt);}
@@ -227,6 +236,7 @@
         <button class="ghost" id="exitChallengeBtn" type="button" style="display:none;">Exit challenge</button>
       </div>
       <div class="progress-note" id="progressNote"></div>
+      <div class="challenge-report" id="challengeReport" style="display:none;"></div>
     </div>
 
     <!-- Left (Puzzles tab): same shape as the drill card, swapped in by the tab switcher -->
@@ -629,6 +639,7 @@
   let challengeQueue = null; // array of remaining drill ids in a "Test all drills" run, or null when none is active
   let challengeTotal = 0;
   let challengeDone = 0;
+  let challengeMissed = [];  // ids of drills played wrong in the round now running
 
   // ---- DOM references ----
   const boardEl = $('board');
@@ -642,6 +653,7 @@
   const shuffleBtn = $('shuffleBtn');
   const testAllBtn = $('testAllBtn');
   const exitChallengeBtn = $('exitChallengeBtn');
+  const challengeReportEl = $('challengeReport');
   const nextBtn = $('nextBtn');
   const hintBtn = $('hintBtn');
   const goBackBtn = $('goBackBtn');
@@ -773,7 +785,9 @@
     shuffleBtn.style.display = running ? 'none' : 'inline-block';
     testAllBtn.style.display = running ? 'none' : 'inline-block';
     exitChallengeBtn.style.display = running ? 'inline-block' : 'none';
-    nextBtn.textContent = running ? 'Next in challenge →' : 'Next drill →';
+    nextBtn.textContent = running
+      ? (drillFinished ? 'Next in challenge →' : 'Skip to next →')
+      : 'Next drill →';
   }
 
   function renderProgressNote(){
@@ -817,7 +831,10 @@
     if(currentDrill) renderBoard();
     // A challenge queue holds bare drill ids, so a mode flip could otherwise keep serving
     // drills from folders that are no longer visible.
-    if(challengeQueue !== null){ challengeQueue = null; challengeTotal = 0; challengeDone = 0; }
+    if(challengeQueue !== null){
+      challengeQueue = null; challengeTotal = 0; challengeDone = 0; challengeMissed = [];
+      hideChallengeReport();
+    }
     populateFolderSelects();
     renderLibraryTab();
     renderProgressNote();
@@ -829,15 +846,27 @@
     applyGameMode();
   });
 
-  // Go back is offered only after a wrong move. Hint is withheld at exactly the moments it
-  // has nothing to point at: after a wrong move (the board no longer matches the line, so
-  // the expected move isn't legal) and once the line is finished.
+  function currentDrillMissed(){
+    return !!(challengeQueue !== null && currentDrill && challengeMissed.indexOf(currentDrill.id) !== -1);
+  }
+
+  // Go back is offered only after a wrong move. Hint is withheld whenever it has nothing to
+  // point at: after a wrong move (the board no longer matches the line, so the expected move
+  // isn't legal) and once the line is finished. During a challenge it's withheld entirely
+  // until you slip — then it opens up for the rest of that drill so you can work the line out.
   function updateDrillControls(){
     goBackBtn.style.display = awaitingGoBack ? 'inline-block' : 'none';
-    hintBtn.disabled = !currentDrill || awaitingGoBack || drillFinished ||
-                       moveIndex >= currentDrill.moves.length;
+    let blocked = !currentDrill || awaitingGoBack || drillFinished ||
+                  moveIndex >= currentDrill.moves.length;
+    if(!blocked && challengeQueue !== null && !currentDrillMissed()) blocked = true;
+    hintBtn.disabled = blocked;
   }
-  function updateNextVisibility(){ nextBtn.style.display = drillFinished ? 'inline-block' : 'none'; }
+  // Also offered mid-drill once you've slipped in a challenge, so a line you don't want to
+  // finish can be left behind rather than blocking the round.
+  function updateNextVisibility(){
+    const show = drillFinished || currentDrillMissed();
+    nextBtn.style.display = show ? 'inline-block' : 'none';
+  }
 
   // ---- Session persistence (resume after tab close) ----
   function saveSession(){
@@ -902,7 +931,9 @@
 
   // ---- Drill selection (shuffle / challenge / next) ----
   function shuffleDrill(){
-    challengeQueue = null; challengeTotal = 0; challengeDone = 0; // manual shuffle always exits a running challenge
+    // Manual shuffle always exits a running challenge.
+    challengeQueue = null; challengeTotal = 0; challengeDone = 0; challengeMissed = [];
+    hideChallengeReport();
     const pool = eligibleDrills();
     if(pool.length === 0){ setStatus('No lines match the selected openings, colour and game mode. Try selecting more openings, or switch game mode.', 'info'); renderProgressNote(); return; }
     let pick = pool[Math.floor(Math.random() * pool.length)];
@@ -926,16 +957,62 @@
 
   function endChallenge(message){
     if(message) setStatus(message, 'ok');
-    challengeQueue = null; challengeTotal = 0; challengeDone = 0;
+    challengeQueue = null; challengeTotal = 0; challengeDone = 0; challengeMissed = [];
     renderProgressNote();
   }
 
-  function startChallenge(){
+  function hideChallengeReport(){ challengeReportEl.style.display = 'none'; }
+
+  // Shown when a round runs out of drills. Both follow-ups stay available: narrow to the
+  // ones you got wrong for repetition, or take the whole set again.
+  function renderChallengeReport(total, missedIds){
+    const correct = total - missedIds.length;
+    const nameOf = (id) => {
+      const d = db.drills.find(x => x.id === id);
+      return d ? d.name : 'a deleted line';
+    };
+    let html = '<div class="cr-score">' + correct + ' of ' + total + ' correct</div>';
+    html += '<div class="cr-sub">' + (missedIds.length === 0
+      ? 'Clean round — every line first time.'
+      : missedIds.length + ' line' + (missedIds.length === 1 ? '' : 's') + ' to work on:') + '</div>';
+    if(missedIds.length){
+      html += '<ul class="cr-missed">' +
+        missedIds.map(id => '<li>' + escapeHtml(nameOf(id)) + '</li>').join('') + '</ul>';
+    }
+    html += '<div class="cr-actions">';
+    if(missedIds.length){
+      html += '<button class="primary" id="crRetryMissedBtn" type="button">Drill the ' +
+              missedIds.length + ' missed</button>';
+    }
+    html += '<button class="ghost" id="crRetryAllBtn" type="button">Do all drills again</button>';
+    html += '<button class="ghost" id="crDismissBtn" type="button">Dismiss</button></div>';
+    challengeReportEl.innerHTML = html;
+    challengeReportEl.style.display = 'block';
+
+    if(missedIds.length){
+      $('crRetryMissedBtn').addEventListener('click', () => startChallenge(missedIds));
+    }
+    $('crRetryAllBtn').addEventListener('click', () => startChallenge());
+    $('crDismissBtn').addEventListener('click', hideChallengeReport);
+  }
+
+  // `ids` restricts the round to those drills (a retry); omit it for every eligible drill.
+  function startChallenge(ids){
     const pool = eligibleDrills();
-    if(pool.length === 0){ setStatus('No lines match the selected openings, colour and game mode. Try selecting more openings, or switch game mode.', 'info'); return; }
-    challengeQueue = shuffleArray(pool.map(d => d.id));
-    challengeTotal = challengeQueue.length;
+    const queue = ids && ids.length
+      ? shuffleArray(ids.filter(id => pool.some(d => d.id === id)))
+      : shuffleArray(pool.map(d => d.id));
+    if(queue.length === 0){
+      setStatus(ids && ids.length
+        ? 'Those lines are no longer available in this mode or opening selection.'
+        : 'No lines match the selected openings, colour and game mode. Try selecting more openings, or switch game mode.', 'info');
+      return;
+    }
+    hideChallengeReport();
+    challengeQueue = queue;
+    challengeTotal = queue.length;
     challengeDone = 0;
+    challengeMissed = [];
     const first = nextChallengeDrill();
     if(!first){ endChallenge(null); return; }
     startDrill(first);
@@ -952,9 +1029,14 @@
   // Advances Next-drill flow: continues a running challenge queue if there is one, otherwise steps to the next drill in order.
   function advanceDrill(){
     if(challengeQueue !== null){
+      // Leaving a line you never finished (skipped after a slip) still counts as dealt with.
+      if(currentDrill && !drillFinished) challengeDone++;
       const drill = nextChallengeDrill();
       if(drill){ startDrill(drill); return; }
-      endChallenge('Challenge complete — ' + challengeDone + ' of ' + challengeTotal + ' lines. Nice work.');
+      const total = challengeTotal, missed = challengeMissed.slice();
+      endChallenge(null);
+      setStatus('Challenge complete — see the report below.', 'ok');
+      renderChallengeReport(total, missed);
       return;
     }
     nextSequentialDrill();
@@ -1038,8 +1120,13 @@
       selectedSquare = null; legalTargets = []; wrongAttempts++;
       awaitingGoBack = true;
       sfxWrong();
+      // One slip marks the line as missed for this round's report, and unlocks the hint
+      // (and a skip) for the rest of it.
+      if(challengeQueue !== null && challengeMissed.indexOf(currentDrill.id) === -1){
+        challengeMissed.push(currentDrill.id);
+      }
       setStatus('Wrong move — go back.', 'err');
-      updateDrillControls();
+      updateDrillControls(); updateNextVisibility();
       renderLedger(); renderBoard();
       return;
     }
@@ -1095,9 +1182,10 @@
   goBackBtn.addEventListener('click', goBack);
   shuffleBtn.addEventListener('click', shuffleDrill);
   nextBtn.addEventListener('click', advanceDrill);
-  testAllBtn.addEventListener('click', startChallenge);
+  testAllBtn.addEventListener('click', () => startChallenge()); // no arg: the click event isn't an id list
   exitChallengeBtn.addEventListener('click', () => {
     endChallenge(null);
+    hideChallengeReport();
     setStatus('Challenge ended. Shuffle or pick a line to carry on practising.', 'info');
   });
   $('colorFilter').addEventListener('click', (e) => {
