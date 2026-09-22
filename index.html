@@ -829,7 +829,14 @@
     applyGameMode();
   });
 
-  function updateGoBackVisibility(){ goBackBtn.style.display = awaitingGoBack ? 'inline-block' : 'none'; }
+  // Go back is offered only after a wrong move. Hint is withheld at exactly the moments it
+  // has nothing to point at: after a wrong move (the board no longer matches the line, so
+  // the expected move isn't legal) and once the line is finished.
+  function updateDrillControls(){
+    goBackBtn.style.display = awaitingGoBack ? 'inline-block' : 'none';
+    hintBtn.disabled = !currentDrill || awaitingGoBack || drillFinished ||
+                       moveIndex >= currentDrill.moves.length;
+  }
   function updateNextVisibility(){ nextBtn.style.display = drillFinished ? 'inline-block' : 'none'; }
 
   // ---- Session persistence (resume after tab close) ----
@@ -873,7 +880,7 @@
     drillNameEl.textContent = drill.name;
     sideBadgeEl.textContent = 'Playing ' + (drill.userColor === 'w' ? 'White' : 'Black');
     hintBtn.disabled = false; restartBtn.disabled = false;
-    updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
+    updateDrillControls(); updateNextVisibility(); renderChecksBadge();
     renderLedger(); renderBoard();
 
     if(drillFinished){
@@ -965,7 +972,7 @@
     hintBtn.disabled = false; restartBtn.disabled = false;
     setStatus('Your move.', 'info');
     renderProgressNote();
-    updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
+    updateDrillControls(); updateNextVisibility(); renderChecksBadge();
     renderLedger(); renderBoard();
     maybeAdvanceOpponent();
   }
@@ -983,7 +990,7 @@
     playMoveSound(lastOpponentMove, chess);
     renderChecksBadge(); renderLedger(); renderBoard();
     if(moveIndex >= currentDrill.moves.length){ completeDrill(false); }
-    else{ resetHint(); setStatus('Your move.', 'info'); saveSession(); }
+    else{ resetHint(); updateDrillControls(); setStatus('Your move.', 'info'); saveSession(); }
   }
 
   function completeDrill(viaThreeCheck){
@@ -999,7 +1006,7 @@
           : ' That was the last one — press "Next in challenge" to finish.')
       : ' Press Next for another.';
     setStatus(lead + 'that\'s ' + currentDrill.completed + ' clean run' + (currentDrill.completed===1?'':'s') + '.' + tail, 'ok');
-    updateNextVisibility(); updateGoBackVisibility();
+    updateNextVisibility(); updateDrillControls();
     renderLedger(); renderLibraryTab(); renderProgressNote();
     saveSession();
   }
@@ -1032,7 +1039,7 @@
       awaitingGoBack = true;
       sfxWrong();
       setStatus('Wrong move — go back.', 'err');
-      updateGoBackVisibility();
+      updateDrillControls();
       renderLedger(); renderBoard();
       return;
     }
@@ -1060,14 +1067,16 @@
     selectedSquare = null; legalTargets = [];
     resetHint();
     setStatus('Your move.', 'info');
-    updateGoBackVisibility();
+    updateDrillControls();
     renderLedger(); renderBoard();
     saveSession();
   }
 
   // ---- Practice button wiring ----
   hintBtn.addEventListener('click', () => {
-    if(!currentDrill || moveIndex >= currentDrill.moves.length) return;
+    // The button is disabled in these states; this guards keyboard activation too, and
+    // stops a hint overwriting the "Wrong move — go back." instruction.
+    if(!currentDrill || awaitingGoBack || moveIndex >= currentDrill.moves.length) return;
     if(reviewOffset > 0){ reviewOffset = 0; renderBoard(); }
     const expected = currentDrill.moves[moveIndex];
     if(hintStage === 0){
@@ -1227,7 +1236,7 @@
         ledgerEl.innerHTML='<div class="empty" style="border:none;">Nothing played yet</div>'; boardEl.innerHTML='';
         hintBtn.disabled=true; restartBtn.disabled=true; setStatus('Line deleted.', 'info');
         awaitingGoBack = false; drillFinished = false; checksGiven = { w: 0, b: 0 }; reviewOffset = 0;
-        updateGoBackVisibility(); updateNextVisibility(); renderChecksBadge();
+        updateDrillControls(); updateNextVisibility(); renderChecksBadge();
         clearSession();
       }
       if(editingId === drill.id){ resetEditor(true); }
