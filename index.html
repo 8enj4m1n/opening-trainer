@@ -182,6 +182,15 @@
   .pz-item .pz-sub{color:var(--muted);font-size:11.5px;font-family:'JetBrains Mono',monospace;margin-top:3px;}
   .pz-item .pz-tick{color:var(--felt);font-weight:700;}
 
+  /* Repertoire tree */
+  .tree-group{border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;}
+  .tree-group:hover{border-color:var(--brass);}
+  .tree-group.active{border-color:var(--brass);background:rgba(201,154,74,.08);}
+  .tree-group .tg-name{font-family:'Fraunces',serif;font-weight:600;font-size:15px;}
+  .tree-group .tg-sub{color:var(--muted);font-size:11.5px;font-family:'JetBrains Mono',monospace;margin-top:3px;}
+  #treeOptions{gap:8px;}
+  #treeLine{font-family:'JetBrains Mono',monospace;line-height:1.7;}
+
   /* Edit-mode banner & editor board sizing */
   .edit-banner{background:rgba(201,154,74,.12);border:1px solid var(--brass);color:var(--brass);padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;}
   .edit-banner button{padding:4px 10px;font-size:12px;}
@@ -260,13 +269,30 @@
       <div class="progress-note" id="pzMeta"></div>
     </div>
 
-    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit / Puzzles) -->
+    <!-- Left (Tree tab): walk down an opening's merged lines, view only -->
+    <div class="board-card" id="treeCard" style="display:none;">
+      <div class="board-header">
+        <div class="drill-name" id="treeTitle">No opening picked</div>
+        <div class="side-badge" id="treeSideBadge">—</div>
+      </div>
+      <div class="board-outer"><div class="board" id="treeBoard"></div></div>
+      <div class="status info" id="treeStatus">Pick an opening in the panel to walk through it.</div>
+      <div class="board-actions" id="treeOptions"></div>
+      <div class="board-actions">
+        <button class="ghost" id="treeBackBtn" type="button">← Back a move</button>
+        <button class="ghost" id="treeResetBtn" type="button">Back to start</button>
+      </div>
+      <div class="progress-note" id="treeLine"></div>
+    </div>
+
+    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit / Puzzles / Tree) -->
     <div class="panel-card">
       <div class="tabs">
         <button class="tab active" data-tab="practice">Practice</button>
         <button class="tab" data-tab="library">Library</button>
         <button class="tab" data-tab="add">Add / edit</button>
         <button class="tab" data-tab="puzzles">Puzzles</button>
+        <button class="tab" data-tab="tree">Tree</button>
       </div>
 
       <div id="tab-practice">
@@ -400,6 +426,11 @@
         </div>
         <div id="pzList"></div>
       </div>
+
+      <div id="tab-tree" style="display:none;">
+        <p class="hint" style="margin-bottom:14px;">Every line you've saved in an opening, merged into one tree. Each opening gets a tree per colour you play it with. Walk down it move by move — this view never changes your drills.</p>
+        <div id="treeList"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -419,10 +450,11 @@
   //   7. ADD / EDIT     — building lines on the editor board
   //   8. ENGINE         — Fairy-Stockfish WASM analysis + pre-scan
   //   9. PUZZLES        — mistakes mined from your chess.com / lichess games
-  //  10. FOCUS MODE     — fullscreen practice view
-  //  11. ARROW KEYS     — practice review + editor undo/redo
-  //  12. ERROR REPORTING (Sentry)
-  //  13. INIT
+  //  10. TREE           — saved lines merged into a walkable repertoire tree
+  //  11. FOCUS MODE     — fullscreen practice view
+  //  12. ARROW KEYS     — practice review + editor undo/redo
+  //  13. ERROR REPORTING (Sentry)
+  //  14. INIT
   // ============================================================
 
   // ============================================================
@@ -846,6 +878,13 @@
     populateFolderSelects();
     renderLibraryTab();
     renderProgressNote();
+    // An open tree may belong to a folder the new mode hides — drop it rather than leave
+    // a tree on screen that the rest of the app no longer acknowledges.
+    if(treeFolder && folderMode(treeFolder) !== gameMode){
+      treeFolder = null; treeRoot = null; treePath = [];
+    }
+    renderTreeList();
+    renderTreeNode();
     switchEngineVariant();
   }
   modeBtn.addEventListener('click', () => {
@@ -1274,15 +1313,17 @@
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      ['practice','library','add','puzzles'].forEach(name => { $('tab-'+name).style.display = (name === tab.dataset.tab) ? 'block' : 'none'; });
-      if(tab.dataset.tab === 'library') renderLibraryTab();
-      if(tab.dataset.tab === 'add'){ if(engineOn) loadEngine(); renderEditBoard(); renderEditLedger(); }
-      // The Puzzles tab swaps the whole left-hand board card, so puzzles get the same
+      const t = tab.dataset.tab;
+      ['practice','library','add','puzzles','tree'].forEach(name => { $('tab-'+name).style.display = (name === t) ? 'block' : 'none'; });
+      if(t === 'library') renderLibraryTab();
+      if(t === 'add'){ if(engineOn) loadEngine(); renderEditBoard(); renderEditLedger(); }
+      // Puzzles and Tree each swap the whole left-hand board card, so they get the same
       // big-board layout as drills instead of a cramped one inside the side panel.
-      const onPuzzles = tab.dataset.tab === 'puzzles';
-      $('drillCard').style.display = onPuzzles ? 'none' : 'block';
-      $('puzzleCard').style.display = onPuzzles ? 'block' : 'none';
-      if(onPuzzles){ renderPuzzleList(); renderPuzzleBoard(); }
+      $('drillCard').style.display = (t === 'puzzles' || t === 'tree') ? 'none' : 'block';
+      $('puzzleCard').style.display = t === 'puzzles' ? 'block' : 'none';
+      $('treeCard').style.display = t === 'tree' ? 'block' : 'none';
+      if(t === 'puzzles'){ renderPuzzleList(); renderPuzzleBoard(); }
+      if(t === 'tree'){ renderTreeList(); renderTreeNode(); }
     });
   });
 
@@ -2625,7 +2666,186 @@
   pzUpdateEstimate();
 
   // ============================================================
-  // 10. FOCUS MODE — fullscreen practice view
+  // 10. TREE — every saved line in an opening, merged and walkable
+  //
+  // Each opening folder gets one tree per colour you play it with. Lines that share a
+  // move sequence share a trunk and split where they diverge, so you can see the whole
+  // shape of a repertoire. Strictly a viewer: nothing here changes a drill.
+  // ============================================================
+  let treeFolder = null;   // '' means uncategorized; null means nothing open
+  let treeColor = 'w';
+  let treeRoot = null;
+  let treePath = [];       // nodes walked into, root excluded
+  let treeChess = null;
+
+  const treeListEl = $('treeList'), treeOptionsEl = $('treeOptions'), treeStatusEl = $('treeStatus'),
+        treeTitleEl = $('treeTitle'), treeSideBadgeEl = $('treeSideBadge'), treeLineEl = $('treeLine');
+
+  // One entry per (opening, colour) pair that actually has lines, honouring the folder's
+  // game mode so a three-check opening doesn't show up while practising standard chess.
+  function treeGroups(){
+    const out = [], seen = {};
+    db.drills.forEach(d => {
+      const folder = d.folder || '';
+      if(folder && folderMode(folder) !== gameMode) return;
+      const key = folder + '|' + d.userColor;
+      if(!seen[key]){ seen[key] = { folder: folder, color: d.userColor, count: 0 }; out.push(seen[key]); }
+      seen[key].count++;
+    });
+    out.sort((a, b) =>
+      (a.folder || '￿').localeCompare(b.folder || '￿') || a.color.localeCompare(b.color));
+    return out;
+  }
+
+  // Merges drills into a trie keyed by move sequence: one node per distinct move reached by
+  // the same path. `lines` counts how many drills run through a node, `ends` names the ones
+  // that stop there.
+  function buildTree(drills){
+    const root = { move: null, children: [], lines: 0, ends: [] };
+    drills.forEach(d => {
+      let node = root;
+      root.lines++;
+      d.moves.forEach(san => {
+        let child = node.children.find(c => c.move === san);
+        if(!child){ child = { move: san, children: [], lines: 0, ends: [] }; node.children.push(child); }
+        child.lines++;
+        node = child;
+      });
+      node.ends.push(d.name);
+    });
+    return root;
+  }
+
+  function openTree(folder, color){
+    treeFolder = folder; treeColor = color;
+    treeRoot = buildTree(db.drills.filter(d => (d.folder || '') === folder && d.userColor === color));
+    treePath = [];
+    renderTreeList();
+    renderTreeNode();
+  }
+
+  function treeNode(){ return treePath.length ? treePath[treePath.length - 1] : treeRoot; }
+
+  function treeLineText(){
+    if(!treePath.length) return '';
+    let out = '';
+    treePath.forEach((n, i) => {
+      if(i % 2 === 0) out += (i / 2 + 1) + '. ';
+      out += n.move + ' ';
+    });
+    return out.trim();
+  }
+
+  function renderTreeList(){
+    const groups = treeGroups();
+    if(!groups.length){
+      treeListEl.innerHTML = '<div class="empty">No lines saved yet for this game mode. Add some in the Add / edit tab.</div>';
+      return;
+    }
+    treeListEl.innerHTML = '';
+    groups.forEach(g => {
+      const row = document.createElement('div');
+      const active = treeFolder !== null && g.folder === treeFolder && g.color === treeColor;
+      row.className = 'tree-group' + (active ? ' active' : '');
+      row.innerHTML = '<div><div class="tg-name">' +
+        escapeHtml(g.folder || 'Uncategorized') + '</div><div class="tg-sub">as ' +
+        (g.color === 'w' ? 'White' : 'Black') + ' · ' + g.count + ' line' + (g.count === 1 ? '' : 's') +
+        '</div></div>';
+      row.addEventListener('click', () => openTree(g.folder, g.color));
+      treeListEl.appendChild(row);
+    });
+  }
+
+  function renderTreeBoard(){
+    const container = $('treeBoard');
+    if(!treeChess){ container.innerHTML = ''; return; }
+    const arr = treeChess.board();
+    const flip = treeColor === 'b';
+    const rowOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    const colOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    container.innerHTML = '';
+    rowOrder.forEach((r, ri) => {
+      colOrder.forEach((c, ci) => {
+        const isLight = (r + c) % 2 === 0;
+        const cell = arr[r][c];
+        const div = document.createElement('div');
+        div.className = 'sq ' + (isLight ? 'light' : 'dark');
+        if(ci === 0){ const rl=document.createElement('span'); rl.className='coord rank'; rl.textContent=8-r; div.appendChild(rl); }
+        if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
+        if(cell){ const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p); }
+        container.appendChild(div);
+      });
+    });
+  }
+
+  function renderTreeNode(){
+    if(treeFolder === null || !treeRoot){
+      treeTitleEl.textContent = 'No opening picked';
+      treeSideBadgeEl.textContent = '—';
+      treeStatusEl.textContent = 'Pick an opening in the panel to walk through it.';
+      treeStatusEl.className = 'status info';
+      treeOptionsEl.innerHTML = '';
+      treeLineEl.textContent = '';
+      treeChess = null;
+      renderTreeBoard();
+      return;
+    }
+
+    treeChess = new Chess();
+    treePath.forEach(n => treeChess.move(n.move, { sloppy: true }));
+
+    treeTitleEl.textContent = treeFolder || 'Uncategorized';
+    treeSideBadgeEl.textContent = 'as ' + (treeColor === 'w' ? 'White' : 'Black');
+    treeLineEl.textContent = treeLineText();
+
+    const node = treeNode();
+    const yourMove = treeChess.turn() === treeColor;
+    treeOptionsEl.innerHTML = '';
+
+    if(node.children.length === 0){
+      treeStatusEl.textContent = 'End of the line' +
+        (node.ends.length ? ' — ' + node.ends.map(n => '"' + n + '"').join(', ') : '') + '.';
+      treeStatusEl.className = 'status ok';
+      return;
+    }
+
+    const single = node.children.length === 1;
+    if(yourMove){
+      treeStatusEl.textContent = single
+        ? 'Your move — one move in this opening.'
+        : 'Your move — ' + node.children.length + ' options saved here, pick one.';
+    }else{
+      treeStatusEl.textContent = single
+        ? 'They play one move here.'
+        : 'They have ' + node.children.length + ' replies in your lines — pick one to follow.';
+    }
+    treeStatusEl.className = 'status info';
+
+    node.children.forEach(child => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = yourMove ? 'primary' : 'ghost';
+      const label = single ? 'Next move: ' + child.move : child.move;
+      b.textContent = label + (child.lines > 1 ? ' (' + child.lines + ' lines)' : '');
+      b.addEventListener('click', () => { treePath.push(child); renderTreeNode(); });
+      treeOptionsEl.appendChild(b);
+    });
+
+    // A line that both continues and stops here: say so, or it looks like it must go on.
+    if(node.ends.length){
+      const note = document.createElement('span');
+      note.className = 'hint';
+      note.style.alignSelf = 'center';
+      note.textContent = 'or the line ends here (' + node.ends.map(n => '"' + n + '"').join(', ') + ')';
+      treeOptionsEl.appendChild(note);
+    }
+  }
+
+  $('treeBackBtn').addEventListener('click', () => { if(treePath.length){ treePath.pop(); renderTreeNode(); } });
+  $('treeResetBtn').addEventListener('click', () => { treePath = []; renderTreeNode(); });
+
+  // ============================================================
+  // 11. FOCUS MODE — fullscreen practice view
   // ============================================================
   function setFocusMode(on){
     wrapEl.classList.toggle('focus-mode', on);
@@ -2649,7 +2869,7 @@
   });
 
   // ============================================================
-  // 11. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
+  // 12. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
   // ============================================================
   document.addEventListener('keydown', (e) => {
     if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -2675,7 +2895,7 @@
   });
 
   // ============================================================
-  // 12. ERROR REPORTING — Sentry manual "Report an issue" button
+  // 13. ERROR REPORTING — Sentry manual "Report an issue" button
   // ============================================================
   const reportBtn = $('reportBtn');
   reportBtn.addEventListener('click', () => {
@@ -2696,7 +2916,7 @@
   });
 
   // ============================================================
-  // 13. INIT
+  // 14. INIT
   // ============================================================
   async function init(){
     await loadDb();
