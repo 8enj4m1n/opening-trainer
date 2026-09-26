@@ -291,11 +291,33 @@
         <button class="ghost" id="treeBackBtn" type="button">← Back a move</button>
         <button class="ghost" id="treeForwardBtn" type="button">Forward →</button>
         <button class="ghost" id="treeResetBtn" type="button">Back to start</button>
+        <button class="primary" id="treeAnalyzeBtn" type="button">Analyse this position</button>
       </div>
       <div class="progress-note" id="treeLine"></div>
     </div>
 
-    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit / Puzzles / Tree) -->
+    <!-- Left (Analysis tab): free board with live engine eval -->
+    <div class="board-card" id="anaCard" style="display:none;">
+      <div class="board-header">
+        <div class="drill-name" id="anaTitle">Analysis board</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="side-badge" id="anaChecksBadge" style="display:none;">Checks —</div>
+          <div class="side-badge" id="anaEvalBadge">—</div>
+          <button class="ghost" id="anaFlipBtn" type="button">Flip</button>
+        </div>
+      </div>
+      <div class="board-outer"><div class="board" id="anaBoard"></div></div>
+      <div class="status info" id="anaStatus">Play moves on the board, or load one of your games.</div>
+      <div class="board-actions">
+        <button class="ghost" id="anaBackBtn" type="button">← Back</button>
+        <button class="ghost" id="anaFwdBtn" type="button">Forward →</button>
+        <button class="ghost" id="anaResetBtn" type="button">Reset board</button>
+        <button class="ghost" id="anaGameLineBtn" type="button" style="display:none;">Back to game line</button>
+      </div>
+      <div class="progress-note" id="anaLine"></div>
+    </div>
+
+    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit / Puzzles / Tree / Analysis) -->
     <div class="panel-card">
       <div class="tabs">
         <button class="tab active" data-tab="practice">Practice</button>
@@ -303,6 +325,7 @@
         <button class="tab" data-tab="add">Add / edit</button>
         <button class="tab" data-tab="puzzles">Puzzles</button>
         <button class="tab" data-tab="tree">Tree</button>
+        <button class="tab" data-tab="analysis">Analysis</button>
       </div>
 
       <div id="tab-practice">
@@ -443,6 +466,47 @@
         <div style="font-size:12.5px;color:var(--muted);margin:16px 0 8px;" id="treeDiagramLabel"></div>
         <div id="treeDiagram"></div>
       </div>
+
+      <div id="tab-analysis" style="display:none;">
+        <div class="board-actions" style="margin-bottom:10px;">
+          <button class="primary" id="anaEngineBtn" type="button">Engine: off</button>
+        </div>
+        <div class="hint" id="anaEngineInfo" style="min-height:40px;"></div>
+
+        <div style="font-size:12.5px;color:var(--muted);margin:18px 0 8px;">Load one of your games</div>
+        <div class="field">
+          <label for="anaSite">Site</label>
+          <select id="anaSite">
+            <option value="lichess">Lichess</option>
+            <option value="chesscom">Chess.com</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="anaUser">Username</label>
+          <input type="text" id="anaUser" placeholder="your username on that site">
+        </div>
+        <div class="field" id="anaSpeedField">
+          <label for="anaSpeed">Time control</label>
+          <select id="anaSpeed">
+            <option value="bullet">Bullet</option>
+            <option value="blitz" selected>Blitz</option>
+            <option value="rapid">Rapid</option>
+          </select>
+        </div>
+        <div class="board-actions">
+          <button class="primary" id="anaLoadBtn" type="button">List recent games</button>
+        </div>
+        <div class="form-msg" id="anaMsg"></div>
+        <div id="anaGameList"></div>
+
+        <details style="margin-top:18px;">
+          <summary>Paste a PGN instead</summary>
+          <div class="field" style="margin-top:10px;">
+            <textarea id="anaPgn" placeholder="Paste a PGN or a bare move list"></textarea>
+            <button class="ghost" id="anaPgnBtn" type="button" style="margin-top:8px;">Load PGN</button>
+          </div>
+        </details>
+      </div>
     </div>
   </div>
 </div>
@@ -463,10 +527,11 @@
   //   8. ENGINE         — Fairy-Stockfish WASM analysis + pre-scan
   //   9. PUZZLES        — mistakes mined from your chess.com / lichess games
   //  10. TREE           — saved lines merged into a walkable repertoire tree
-  //  11. FOCUS MODE     — fullscreen practice view
-  //  12. ARROW KEYS     — practice review + editor undo/redo
-  //  13. ERROR REPORTING (Sentry)
-  //  14. INIT
+  //  11. ANALYSIS       — free board with live engine eval, and past games
+  //  12. FOCUS MODE     — fullscreen practice view
+  //  13. ARROW KEYS     — practice review + editor undo/redo
+  //  14. ERROR REPORTING (Sentry)
+  //  15. INIT
   // ============================================================
 
   // ============================================================
@@ -897,6 +962,7 @@
     }
     renderTreeList();
     renderTreeNode();
+    anaSyncMode();
     switchEngineVariant();
   }
   modeBtn.addEventListener('click', () => {
@@ -1326,16 +1392,30 @@
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       const t = tab.dataset.tab;
-      ['practice','library','add','puzzles','tree'].forEach(name => { $('tab-'+name).style.display = (name === t) ? 'block' : 'none'; });
+      ['practice','library','add','puzzles','tree','analysis'].forEach(name => { $('tab-'+name).style.display = (name === t) ? 'block' : 'none'; });
       if(t === 'library') renderLibraryTab();
       if(t === 'add'){ if(engineOn) loadEngine(); renderEditBoard(); renderEditLedger(); }
-      // Puzzles and Tree each swap the whole left-hand board card, so they get the same
-      // big-board layout as drills instead of a cramped one inside the side panel.
-      $('drillCard').style.display = (t === 'puzzles' || t === 'tree') ? 'none' : 'block';
+      // Puzzles, Tree and Analysis each swap the whole left-hand board card, so they get the
+      // same big-board layout as drills instead of a cramped one inside the side panel.
+      const bigBoardTab = (t === 'puzzles' || t === 'tree' || t === 'analysis');
+      $('drillCard').style.display = bigBoardTab ? 'none' : 'block';
       $('puzzleCard').style.display = t === 'puzzles' ? 'block' : 'none';
       $('treeCard').style.display = t === 'tree' ? 'block' : 'none';
+      $('anaCard').style.display = t === 'analysis' ? 'block' : 'none';
       if(t === 'puzzles'){ renderPuzzleList(); renderPuzzleBoard(); }
       if(t === 'tree'){ renderTreeList(); renderTreeNode(); }
+
+      // Hand the engine over explicitly. Without this the editor would fight an analysis
+      // search still in flight, and its bestmove would be routed to the wrong handler.
+      const wasAnalysis = anaActive;
+      anaActive = (t === 'analysis');
+      if(anaActive){
+        if(anaOn) loadEngine();
+        renderAnalysis();
+      }else if(wasAnalysis){
+        if(engineBusy && engineBusy.ana){ engineBusy.stopped = true; engine.postMessage('stop'); }
+        else { analyzeEditPosition(); maybePrescan(); }
+      }
     });
   });
 
@@ -1838,12 +1918,16 @@
         return;
       }
       engine.postMessage('ucinewgame');
+      // Analysis owns the engine whenever its tab is open, so it gets first refusal here —
+      // otherwise loading the engine, or switching game mode, would silently stop analysis.
+      if(anaActive){ anaAnalyze(); return; }
       analyzeEditPosition();
       maybePrescan();
       return;
     }
     if(engineStatus === 'failed' || !engineBusy) return;
     if(engineBusy.scan){ onScanLine(line); return; }
+    if(engineBusy.ana){ onAnalysisLine(line); return; }
     if(line.indexOf('bestmove') === 0){
       const finished = engineBusy; engineBusy = null;
       const mv = line.split(' ')[1];
@@ -1939,7 +2023,7 @@
   }
 
   function analyzeEditPosition(){
-    if(scanActive) return; // a puzzle scan owns the engine
+    if(scanActive || anaActive) return; // a puzzle scan or the analysis board owns the engine
     renderEngineInfo();
     if(!engineOn || engineStatus !== 'ready') return;
     const pos = editEnginePos();
@@ -1986,7 +2070,7 @@
   }
 
   function maybePrescan(){
-    if(scanActive) return; // a puzzle scan owns the engine
+    if(scanActive || anaActive) return; // a puzzle scan or the analysis board owns the engine
     if(!engineOn || engineStatus !== 'ready' || engineBusy) return;
     if(enginePrescanDirty || !prescanQueue){ prescanQueue = buildPrescanQueue(); enginePrescanDirty = false; }
     while(prescanQueue.length){
@@ -2129,12 +2213,27 @@
     return { headers: headers, sans: sans };
   }
 
+  // Standard opening position, six fields. Chess.com writes this plus a "+0+0" check
+  // counter for three-check games, which is still just the normal starting array.
+  const PZ_START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
   // Turns one raw PGN into an analysable game, or null if it doesn't qualify.
-  function pzPrepGame(rec, username){
+  // `variant` defaults to 'chess' so the puzzle pipeline behaves exactly as before.
+  function pzPrepGame(rec, username, variant){
     const parsed = pzParsePgn(rec.pgn);
     const h = parsed.headers;
-    if(h.FEN || h.SetUp) return null;                             // custom start position
-    if(h.Variant && !/^standard$/i.test(h.Variant)) return null;  // not normal chess
+    const want = variant || 'chess';
+    const v = (h.Variant || 'Standard').toLowerCase();
+    if(want === 'chess'){
+      if(h.FEN || h.SetUp) return null;                           // custom start position
+      if(!/^standard$/.test(v)) return null;                      // not normal chess
+    }else{
+      if(!/^(3-check|three-check|threecheck)$/.test(v)) return null;
+      // Chess.com tags every three-check game with a FEN header. Accept it only when it is
+      // the ordinary starting array, so "position startpos moves ..." stays valid — a real
+      // custom position would need Fairy-Stockfish's check-count FEN field.
+      if(h.FEN && h.FEN.split(' ').slice(0, 6).join(' ') !== PZ_START_FEN) return null;
+    }
     const u = username.toLowerCase();
     let userColor = null;
     if((h.White || '').toLowerCase() === u) userColor = 'w';
@@ -2178,10 +2277,15 @@
     return perf.last.rating;
   }
 
-  async function pzFetchGames(site, user, speed, want){
+  // `variant` defaults to 'chess'. For three-check, Lichess exposes it as its own perfType
+  // (a variant, not a speed), while Chess.com keeps it under `rules` with a normal
+  // time_class — so the speed filter only applies to standard chess.
+  async function pzFetchGames(site, user, speed, want, variant){
+    const v = variant || 'chess';
     if(site === 'lichess'){
+      const perf = v === 'chess' ? speed : 'threeCheck';
       const r = await fetch('https://lichess.org/api/games/user/' + encodeURIComponent(user) +
-                            '?max=' + want + '&rated=true&perfType=' + speed);
+                            '?max=' + want + '&rated=true&perfType=' + perf);
       if(r.status === 429) throw new Error('Lichess is rate-limiting requests — wait about a minute and try again.');
       if(r.status === 404) throw new Error('No Lichess account called "' + user + '".');
       if(!r.ok) throw new Error('Lichess returned ' + r.status + '.');
@@ -2200,7 +2304,8 @@
       const games = ((await r.json()).games) || [];
       for(let k = games.length - 1; k >= 0 && out.length < want; k--){
         const g = games[k];
-        if(g.rules !== 'chess' || g.time_class !== speed || !g.rated) continue;
+        if(g.rules !== v || !g.rated) continue;
+        if(v === 'chess' && g.time_class !== speed) continue;
         out.push({ pgn: g.pgn, url: g.url });
       }
     }
@@ -2997,8 +3102,367 @@
   $('treeForwardBtn').addEventListener('click', treeForward);
   $('treeResetBtn').addEventListener('click', () => { treePath = []; renderTreeNode(); });
 
+  // Hand the position you've walked to over to the Analysis board, so you can carry on past
+  // the end of your repertoire and see what the engine makes of it.
+  $('treeAnalyzeBtn').addEventListener('click', () => {
+    if(treeFolder === null || !treeRoot) return;
+    const label = (treeFolder || 'Uncategorized') + ' — as ' + (treeColor === 'w' ? 'White' : 'Black');
+    anaSetLine(treePath.map(n => n.move), label, '', treeColor === 'b');
+    if(!anaOn){ anaOn = true; anaEngineBtn.textContent = 'Engine: on'; loadEngine(); }
+    document.querySelector('.tab[data-tab="analysis"]').click();
+  });
+
   // ============================================================
-  // 11. FOCUS MODE — fullscreen practice view
+  // 11. ANALYSIS — free board with live engine eval, and past games
+  //
+  // Follows the app's game mode: three-check or standard, whichever is active, since the
+  // engine's UCI_Variant is already switched by applyGameMode(). Positions are always sent
+  // as "position startpos moves ..." rather than a FEN — that's what carries the check
+  // tally to Fairy-Stockfish in three-check, which a plain FEN would lose.
+  // ============================================================
+  let anaChess = new Chess();
+  let anaMoves = [];        // the line currently on the board (SAN)
+  let anaUcis = [];         // same line in UCI, for the engine
+  let anaIdx = 0;           // how many of anaMoves are played
+  let anaGame = null;       // { moves, label, url } of a loaded game, kept immutable
+  let anaSel = null, anaTargets = [];
+  let anaFlip = false;
+  let anaOn = false;        // engine analysis switched on
+  let anaActive = false;    // the Analysis tab owns the engine
+  let anaChecks = { w: 0, b: 0 };
+
+  const anaBoardEl = $('anaBoard'), anaStatusEl = $('anaStatus'), anaLineEl = $('anaLine'),
+        anaEvalBadge = $('anaEvalBadge'), anaChecksBadge = $('anaChecksBadge'),
+        anaEngineInfoEl = $('anaEngineInfo'), anaEngineBtn = $('anaEngineBtn'),
+        anaTitleEl = $('anaTitle'), anaMsgEl = $('anaMsg'), anaGameListEl = $('anaGameList');
+
+  function anaVariant(){ return gameMode === 'three-check' ? 'threecheck' : 'chess'; }
+
+  // chess.js has no idea about three-check, so the tally is counted here the same way
+  // practice does it, and the game is called over at three.
+  function anaRebuild(){
+    anaChess = new Chess();
+    anaUcis = [];
+    anaChecks = { w: 0, b: 0 };
+    for(let i = 0; i < anaIdx && i < anaMoves.length; i++){
+      const mover = anaChess.turn();
+      const mv = anaChess.move(anaMoves[i], { sloppy: true });
+      if(!mv){ anaMoves = anaMoves.slice(0, i); anaIdx = i; break; }
+      anaUcis.push(mv.from + mv.to + (mv.promotion || ''));
+      if(anaChess.in_check()) anaChecks[mover]++;
+    }
+  }
+
+  function anaGameOver(){
+    if(gameMode === 'three-check' &&
+       (anaChecks.w >= CHECKS_TO_WIN || anaChecks.b >= CHECKS_TO_WIN)) return true;
+    return anaChess.game_over();
+  }
+
+  function anaKey(){ return anaUcis.join(' ') + '|' + gameMode; }
+
+  function anaSetLine(sans, label, url, flip){
+    anaMoves = sans.slice();
+    anaIdx = sans.length;
+    anaGame = label ? { moves: sans.slice(), label: label, url: url || '' } : null;
+    if(flip !== undefined) anaFlip = flip;
+    anaRebuild();
+    renderAnalysis();
+  }
+
+  // ---- Board ----
+  function renderAnaBoard(){
+    const arr = anaChess.board();
+    const rowOrder = anaFlip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    const colOrder = anaFlip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    const live = !anaGameOver();
+    anaBoardEl.innerHTML = '';
+    rowOrder.forEach((r, ri) => {
+      colOrder.forEach((c, ci) => {
+        const isLight = (r + c) % 2 === 0;
+        const sqName = FILES[c] + (8 - r);
+        const cell = arr[r][c];
+        const div = document.createElement('div');
+        div.className = 'sq ' + (isLight ? 'light' : 'dark');
+        div.dataset.square = sqName;
+        if(ci === 0){ const rl=document.createElement('span'); rl.className='coord rank'; rl.textContent=8-r; div.appendChild(rl); }
+        if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
+        if(cell){
+          const p=document.createElement('span'); p.className='piece '+cell.color;
+          p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p);
+          if(gameMode === 'three-check' && cell.type === 'k'){
+            const left = Math.max(0, CHECKS_TO_WIN - (anaChecks[cell.color === 'w' ? 'b' : 'w'] || 0));
+            const cc = document.createElement('span'); cc.className = 'check-count'; cc.textContent = left;
+            div.appendChild(cc);
+          }
+        }
+        if(anaSel === sqName) div.classList.add('selected');
+        const target = anaTargets.find(t => t.to === sqName);
+        if(target){ const mk=document.createElement('span'); mk.className = cell ? 'ring' : 'dot'; div.appendChild(mk); }
+        const clickable = live && ((cell && cell.color === anaChess.turn()) || target);
+        if(clickable){
+          div.classList.add('selectable'); div.tabIndex = 0;
+          div.addEventListener('click', () => onAnaSquareClick(sqName));
+          div.addEventListener('keydown', (e) => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); onAnaSquareClick(sqName);} });
+        }
+        anaBoardEl.appendChild(div);
+      });
+    });
+  }
+
+  function onAnaSquareClick(sqName){
+    if(anaGameOver()) return;
+    const pickUp = () => {
+      const cell = anaChess.get(sqName);
+      if(cell && cell.color === anaChess.turn()){
+        anaSel = sqName;
+        anaTargets = anaChess.moves({ square: sqName, verbose: true });
+        renderAnaBoard();
+      }
+    };
+    if(anaSel === null){ pickUp(); return; }
+    if(sqName === anaSel){ anaSel = null; anaTargets = []; renderAnaBoard(); return; }
+    const target = anaTargets.find(t => t.to === sqName);
+    if(!target){ pickUp(); return; }
+    const mv = anaChess.move({ from: anaSel, to: sqName, promotion: 'q' });
+    anaSel = null; anaTargets = [];
+    if(!mv){ renderAnaBoard(); return; }
+    anaChess.undo(); // replayed properly below so the check tally stays right
+    // Playing from part-way back starts a new line from here; the loaded game is untouched
+    // in anaGame, so "Back to game line" always brings it back.
+    anaMoves = anaMoves.slice(0, anaIdx);
+    anaMoves.push(mv.san);
+    anaIdx = anaMoves.length;
+    anaRebuild();
+    renderAnalysis();
+    playMoveSound(mv, anaChess);
+  }
+
+  // ---- Engine ----
+  function anaPvSan(fen, ucis){
+    const t = new Chess(fen);
+    const out = [];
+    for(const u of (ucis || []).slice(0, 10)){
+      const mv = t.move({ from: u.slice(0,2), to: u.slice(2,4), promotion: u.length > 4 ? u[4] : undefined });
+      if(!mv) break;
+      out.push(mv.san);
+    }
+    return out;
+  }
+
+  function renderAnaEngine(job){
+    if(!anaOn){
+      anaEngineInfoEl.textContent = 'Engine off — switch it on for a live evaluation.';
+      anaEvalBadge.textContent = '—';
+      return;
+    }
+    if(scanActive){
+      anaEngineInfoEl.textContent = 'Engine is busy finishing the puzzle scan.';
+      anaEvalBadge.textContent = '—';
+      return;
+    }
+    if(engineStatus === 'failed'){
+      anaEngineInfoEl.textContent = 'Engine unavailable — try fully reloading the page.';
+      return;
+    }
+    if(engineStatus === 'loading'){ anaEngineInfoEl.textContent = 'Loading engine…'; return; }
+    if(anaGameOver()){
+      anaEngineInfoEl.textContent = 'Game over in this position.';
+      anaEvalBadge.textContent = '—';
+      return;
+    }
+    if(!job || job.cp === null || job.key !== anaKey()){
+      anaEngineInfoEl.textContent = 'Thinking…';
+      return;
+    }
+    const white = job.turn === 'w' ? job.cp : -job.cp;
+    anaEvalBadge.textContent = pzFmtEval(white);
+    const pv = anaPvSan(job.fen, job.pv);
+    anaEngineInfoEl.textContent = 'Depth ' + job.depth + ' · ' + pzFmtEval(white) +
+      (pv.length ? ' · best: ' + pv.join(' ') : '');
+  }
+
+  // One search at a time: a new position never starts a search directly, it only asks the
+  // running one to stop. The bestmove handler then starts whatever position is current by
+  // then, so a stale search can't paint its eval onto the wrong position.
+  function anaAnalyze(){
+    if(!anaActive || !anaOn || scanActive) return;
+    if(engineStatus !== 'ready'){ renderAnaEngine(null); return; }
+    if(anaGameOver()){ renderAnaEngine(null); return; }
+    if(engineBusy){
+      if(engineBusy.key !== anaKey()){ engineBusy.stopped = true; engine.postMessage('stop'); }
+      return;
+    }
+    engineBusy = { ana: true, key: anaKey(), ucis: anaUcis.slice(), fen: anaChess.fen(),
+                   turn: anaChess.turn(), depth: 0, cp: null, pv: null, stopped: false };
+    engine.postMessage(anaUcis.length ? 'position startpos moves ' + anaUcis.join(' ') : 'position startpos');
+    engine.postMessage('go movetime 12000 depth 26');
+    renderAnaEngine(null);
+  }
+
+  function onAnalysisLine(line){
+    const job = engineBusy;
+    if(line.indexOf('bestmove') === 0){
+      engineBusy = null;
+      if(anaActive && anaOn && engineStatus === 'ready'){ anaAnalyze(); return; }
+      // Left the tab or switched off: hand the engine back to its other users.
+      if(!anaActive){ analyzeEditPosition(); maybePrescan(); }
+      return;
+    }
+    if(job.stopped || line.indexOf('info ') !== 0) return;
+    const mpv = line.match(/\bmultipv (\d+)/);
+    if(mpv && mpv[1] !== '1') return;
+    const d = line.match(/\bdepth (\d+)/);
+    const sc = line.match(/\bscore (cp|mate) (-?\d+)/);
+    if(!d || !sc) return;
+    job.depth = parseInt(d[1], 10);
+    job.cp = pzScoreToCp(sc[1], parseInt(sc[2], 10));
+    const pvm = line.match(/\bpv (.+)$/);
+    if(pvm) job.pv = pvm[1].trim().split(/\s+/).filter(t => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(t));
+    if(job.key === anaKey()) renderAnaEngine(job); // only paint the position on screen
+  }
+
+  // ---- Rendering ----
+  function anaLineText(){
+    let out = '';
+    anaMoves.forEach((san, i) => {
+      if(i % 2 === 0) out += (i / 2 + 1) + '. ';
+      out += (i === anaIdx - 1 ? '[' + san + '] ' : san + ' ');
+    });
+    return out.trim();
+  }
+
+  function renderAnalysis(){
+    anaSel = null; anaTargets = [];
+    anaTitleEl.textContent = anaGame ? anaGame.label : 'Analysis board';
+    anaChecksBadge.style.display = gameMode === 'three-check' ? '' : 'none';
+    if(gameMode === 'three-check'){
+      anaChecksBadge.textContent = 'Checks — W ' + anaChecks.w + ' · B ' + anaChecks.b;
+    }
+    $('anaBackBtn').disabled = anaIdx === 0;
+    $('anaFwdBtn').disabled = anaIdx >= anaMoves.length;
+    $('anaResetBtn').disabled = anaMoves.length === 0;
+    $('anaGameLineBtn').style.display = anaGame ? 'inline-block' : 'none';
+    anaLineEl.textContent = anaMoves.length ? anaLineText() : 'No moves yet.';
+
+    let status;
+    if(anaGameOver()){
+      if(gameMode === 'three-check' && (anaChecks.w >= CHECKS_TO_WIN || anaChecks.b >= CHECKS_TO_WIN)){
+        status = (anaChecks.w >= CHECKS_TO_WIN ? 'White' : 'Black') + ' wins by three checks.';
+      }else if(anaChess.in_checkmate()){
+        status = (anaChess.turn() === 'w' ? 'Black' : 'White') + ' wins by checkmate.';
+      }else status = 'Game over — drawn position.';
+    }else{
+      status = (anaChess.turn() === 'w' ? 'White' : 'Black') + ' to move. Play any legal move to explore.';
+    }
+    anaStatusEl.textContent = status;
+    anaStatusEl.className = 'status ' + (anaGameOver() ? 'ok' : 'info');
+
+    renderAnaBoard();
+    anaAnalyze();
+    if(!anaOn || engineStatus !== 'ready') renderAnaEngine(null);
+  }
+
+  // ---- Navigation ----
+  function anaBack(){ if(anaIdx > 0){ anaIdx--; anaRebuild(); renderAnalysis(); } }
+  function anaForward(){ if(anaIdx < anaMoves.length){ anaIdx++; anaRebuild(); renderAnalysis(); } }
+
+  $('anaBackBtn').addEventListener('click', anaBack);
+  $('anaFwdBtn').addEventListener('click', anaForward);
+  $('anaResetBtn').addEventListener('click', () => { anaMoves = []; anaIdx = 0; anaGame = null; anaRebuild(); renderAnalysis(); });
+  $('anaGameLineBtn').addEventListener('click', () => {
+    if(!anaGame) return;
+    anaMoves = anaGame.moves.slice();
+    if(anaIdx > anaMoves.length) anaIdx = anaMoves.length;
+    anaRebuild(); renderAnalysis();
+  });
+  $('anaFlipBtn').addEventListener('click', () => { anaFlip = !anaFlip; renderAnaBoard(); });
+
+  anaEngineBtn.addEventListener('click', () => {
+    anaOn = !anaOn;
+    anaEngineBtn.textContent = 'Engine: ' + (anaOn ? 'on' : 'off');
+    if(anaOn){ loadEngine(); anaAnalyze(); }
+    else if(engineBusy && engineBusy.ana){ engineBusy.stopped = true; engine.postMessage('stop'); }
+    renderAnaEngine(null);
+  });
+
+  // ---- Loading games ----
+  function anaSetMsg(t, kind){ anaMsgEl.textContent = t; anaMsgEl.className = 'form-msg ' + (kind || ''); }
+
+  async function anaListGames(){
+    const site = $('anaSite').value, user = $('anaUser').value.trim(), speed = $('anaSpeed').value;
+    const variant = anaVariant();
+    if(!user){ anaSetMsg('Enter your username first.', 'err'); return; }
+    $('anaLoadBtn').disabled = true;
+    anaSetMsg('Fetching your ' + (variant === 'chess' ? speed + ' games' : 'three-check games') + '…', '');
+    try{
+      const raw = await pzFetchGames(site, user, speed, 30, variant);
+      const games = [];
+      raw.forEach(rec => { const g = pzPrepGame(rec, user, variant); if(g) games.push(g); });
+      if(!games.length){
+        anaSetMsg('No ' + (variant === 'chess' ? 'standard' : 'three-check') + ' games found for that account.', 'err');
+        anaGameListEl.innerHTML = '';
+      }else{
+        anaSetMsg('Pick a game to open it on the board.', 'ok');
+        anaGameListEl.innerHTML = '';
+        games.forEach(g => {
+          const row = document.createElement('div');
+          row.className = 'pz-item';
+          row.innerHTML = '<div><div class="pz-name">vs ' + escapeHtml(g.opponent) + '</div>' +
+            '<div class="pz-sub">as ' + (g.userColor === 'w' ? 'White' : 'Black') + ' · ' +
+            Math.ceil(g.sans.length / 2) + ' moves' + (g.elo ? ' · rated ' + g.elo : '') + '</div></div>';
+          row.addEventListener('click', () => {
+            anaSetLine(g.sans, 'vs ' + g.opponent, g.url, g.userColor === 'b');
+            anaSetMsg('Loaded. Use ← and → to step through it.', 'ok');
+          });
+          anaGameListEl.appendChild(row);
+        });
+      }
+    }catch(err){
+      anaSetMsg((err && err.message) ? err.message : 'Could not reach that site.', 'err');
+    }
+    $('anaLoadBtn').disabled = false;
+  }
+
+  // Three-check isn't a speed on either site — Lichess files it under its own perfType and
+  // Chess.com under `rules` — so the time-control picker only applies to standard chess.
+  function anaSyncMode(){
+    $('anaSpeedField').style.display = anaVariant() === 'chess' ? '' : 'none';
+    if(anaActive) renderAnalysis();
+  }
+
+  // Reuse whatever account the Puzzles tab already knows about.
+  try{
+    const f = JSON.parse(localStorage.getItem(PZ_FORM_KEY) || 'null');
+    if(f){
+      if(f.site) $('anaSite').value = f.site;
+      if(f.user) $('anaUser').value = f.user;
+      if(f.speed) $('anaSpeed').value = f.speed;
+    }
+  }catch(e){}
+  anaSyncMode();
+
+  $('anaLoadBtn').addEventListener('click', anaListGames);
+  $('anaPgnBtn').addEventListener('click', () => {
+    const text = $('anaPgn').value.trim();
+    if(!text){ anaSetMsg('Paste a PGN first.', 'err'); return; }
+    const parsed = pzParsePgn(text);
+    const t = new Chess();
+    const sans = [];
+    for(const san of parsed.sans){
+      const mv = t.move(san, { sloppy: true });
+      if(!mv) break;
+      sans.push(mv.san);
+    }
+    if(!sans.length){ anaSetMsg('No legal moves found in that PGN.', 'err'); return; }
+    const h = parsed.headers;
+    const label = (h.White && h.Black) ? h.White + ' vs ' + h.Black : 'Pasted game';
+    anaSetLine(sans, label, h.Site || h.Link || '', false);
+    anaSetMsg('Loaded ' + sans.length + ' moves.', 'ok');
+  });
+
+  // ============================================================
+  // 12. FOCUS MODE — fullscreen practice view
   // ============================================================
   function setFocusMode(on){
     wrapEl.classList.toggle('focus-mode', on);
@@ -3022,7 +3486,7 @@
   });
 
   // ============================================================
-  // 12. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
+  // 13. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
   // ============================================================
   document.addEventListener('keydown', (e) => {
     if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -3050,11 +3514,15 @@
       // Left walks back up the tree; right plays on when the line doesn't branch.
       if(e.key === 'ArrowLeft') treeBack();
       else treeForward();
+    } else if(tabName === 'analysis'){
+      e.preventDefault();
+      if(e.key === 'ArrowLeft') anaBack();
+      else anaForward();
     }
   });
 
   // ============================================================
-  // 13. ERROR REPORTING — Sentry manual "Report an issue" button
+  // 14. ERROR REPORTING — Sentry manual "Report an issue" button
   // ============================================================
   const reportBtn = $('reportBtn');
   reportBtn.addEventListener('click', () => {
@@ -3075,7 +3543,7 @@
   });
 
   // ============================================================
-  // 14. INIT
+  // 15. INIT
   // ============================================================
   async function init(){
     await loadDb();
