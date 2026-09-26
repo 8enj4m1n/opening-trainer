@@ -190,7 +190,9 @@
   .tree-group .tg-sub{color:var(--muted);font-size:11.5px;font-family:'JetBrains Mono',monospace;margin-top:3px;}
   #treeOptions{gap:8px;}
   #treeLine{font-family:'JetBrains Mono',monospace;line-height:1.7;}
-  #treeDiagram{max-height:460px;overflow:auto;border:1px solid var(--line);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12.5px;}
+  /* position:relative so a row's offsetTop is measured against this box, letting us scroll
+     the box itself rather than the whole page when arrow keys walk the tree. */
+  #treeDiagram{position:relative;max-height:460px;overflow:auto;border:1px solid var(--line);border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:12.5px;}
   #treeDiagram:empty{display:none;}
   .tree-row{padding:3px 8px;cursor:pointer;white-space:nowrap;border-left:3px solid transparent;}
   .tree-row:hover{background:var(--panel-2);}
@@ -287,6 +289,7 @@
       <div class="board-actions" id="treeOptions"></div>
       <div class="board-actions">
         <button class="ghost" id="treeBackBtn" type="button">← Back a move</button>
+        <button class="ghost" id="treeForwardBtn" type="button">Forward →</button>
         <button class="ghost" id="treeResetBtn" type="button">Back to start</button>
       </div>
       <div class="progress-note" id="treeLine"></div>
@@ -435,7 +438,7 @@
       </div>
 
       <div id="tab-tree" style="display:none;">
-        <p class="hint" style="margin-bottom:14px;">Every line you've saved in an opening, merged into one tree. Each opening gets a tree per colour you play it with. Walk down it move by move — this view never changes your drills.</p>
+        <p class="hint" style="margin-bottom:14px;">Every line you've saved in an opening, merged into one tree. Each opening gets a tree per colour you play it with. Use ← and → to walk it, or play a move straight on the board when the line branches — this view never changes your drills.</p>
         <div id="treeList"></div>
         <div style="font-size:12.5px;color:var(--muted);margin:16px 0 8px;" id="treeDiagramLabel"></div>
         <div id="treeDiagram"></div>
@@ -2686,6 +2689,8 @@
   let treeRoot = null;
   let treePath = [];       // nodes walked into, root excluded
   let treeChess = null;
+  let treeSel = null;      // square picked up on the tree board
+  let treeTargets = [];
 
   const treeListEl = $('treeList'), treeOptionsEl = $('treeOptions'), treeStatusEl = $('treeStatus'),
         treeTitleEl = $('treeTitle'), treeSideBadgeEl = $('treeSideBadge'), treeLineEl = $('treeLine');
@@ -2765,6 +2770,15 @@
     });
   }
 
+  // Walks one move deeper. Every forward step goes through here — buttons, arrow key,
+  // diagram clicks and moves played on the board — so they can't drift apart.
+  function treeAdvanceTo(child){
+    treePath.push(child);
+    renderTreeNode();
+    const hist = treeChess.history({ verbose: true });
+    playMoveSound(hist[hist.length - 1], treeChess);
+  }
+
   function renderTreeBoard(){
     const container = $('treeBoard');
     if(!treeChess){ container.innerHTML = ''; return; }
@@ -2772,19 +2786,67 @@
     const flip = treeColor === 'b';
     const rowOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
     const colOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    // Pieces are only movable with an opening open and moves still to come; treeFolder can
+    // legitimately be '' (Uncategorized), so test against null rather than falsiness.
+    const live = treeFolder !== null && treeRoot && treeNode().children.length > 0;
     container.innerHTML = '';
     rowOrder.forEach((r, ri) => {
       colOrder.forEach((c, ci) => {
         const isLight = (r + c) % 2 === 0;
+        const sqName = FILES[c] + (8 - r);
         const cell = arr[r][c];
         const div = document.createElement('div');
         div.className = 'sq ' + (isLight ? 'light' : 'dark');
+        div.dataset.square = sqName;
         if(ci === 0){ const rl=document.createElement('span'); rl.className='coord rank'; rl.textContent=8-r; div.appendChild(rl); }
         if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
         if(cell){ const p=document.createElement('span'); p.className='piece '+cell.color; p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p); }
+        if(treeSel === sqName) div.classList.add('selected');
+        const target = treeTargets.find(t => t.to === sqName);
+        if(target){ const mk=document.createElement('span'); mk.className = cell ? 'ring' : 'dot'; div.appendChild(mk); }
+        const clickable = live && ((cell && cell.color === treeChess.turn()) || target);
+        if(clickable){
+          div.classList.add('selectable'); div.tabIndex = 0;
+          div.addEventListener('click', () => onTreeSquareClick(sqName));
+          div.addEventListener('keydown', (e) => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); onTreeSquareClick(sqName);} });
+        }
         container.appendChild(div);
       });
     });
+  }
+
+  // Play a move straight on the board. It's accepted when the opening actually contains it,
+  // which is how you choose between branches without hunting for the right button.
+  function onTreeSquareClick(sqName){
+    if(treeFolder === null || !treeChess) return;
+    const node = treeNode();
+    if(!node.children.length) return;
+    const pickUp = () => {
+      const cell = treeChess.get(sqName);
+      if(cell && cell.color === treeChess.turn()){
+        treeSel = sqName;
+        treeTargets = treeChess.moves({ square: sqName, verbose: true });
+        renderTreeBoard();
+      }
+    };
+    if(treeSel === null){ pickUp(); return; }
+    if(sqName === treeSel){ treeSel = null; treeTargets = []; renderTreeBoard(); return; }
+    const target = treeTargets.find(t => t.to === sqName);
+    if(!target){ pickUp(); return; }
+
+    const mv = treeChess.move({ from: treeSel, to: sqName, promotion: 'q' });
+    treeSel = null; treeTargets = [];
+    if(!mv){ renderTreeBoard(); return; }
+    const child = node.children.find(c => stripSym(c.move) === stripSym(mv.san));
+    treeChess.undo(); // renderTreeNode rebuilds the position from treePath anyway
+    if(child){
+      treeAdvanceTo(child);
+      return;
+    }
+    sfxWrong();
+    renderTreeBoard();
+    treeStatusEl.textContent = mv.san + ' isn\'t in this opening — try one of the saved moves.';
+    treeStatusEl.className = 'status err';
   }
 
   // The whole tree as an indented, clickable outline next to the board: the board shows one
@@ -2818,19 +2880,26 @@
           end.title = 'Line ends here: ' + child.ends.join(', ');
           row.appendChild(end);
         }
-        row.addEventListener('click', () => { treePath = p; renderTreeNode(); });
+        row.addEventListener('click', () => { treePath = p.slice(0, -1); treeAdvanceTo(child); });
         el.appendChild(row);
         walk(child, p, depth + 1);
       });
     };
     walk(treeRoot, [], 0);
 
-    if(currentRow && currentRow.scrollIntoView){
-      currentRow.scrollIntoView({ block: 'nearest' });
+    // Scroll the diagram box itself, never the page — scrollIntoView() would drag the board
+    // out of view every time an arrow key walks the tree, especially on the stacked layout.
+    if(currentRow){
+      const top = currentRow.offsetTop, bottom = top + currentRow.offsetHeight;
+      if(top < el.scrollTop) el.scrollTop = top;
+      else if(bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
     }
   }
 
   function renderTreeNode(){
+    // Cleared centrally: every navigation path runs through here, so a piece picked up in
+    // the previous position can never stay highlighted in the new one.
+    treeSel = null; treeTargets = [];
     if(treeFolder === null || !treeRoot){
       treeTitleEl.textContent = 'No opening picked';
       treeSideBadgeEl.textContent = '—';
@@ -2841,6 +2910,7 @@
       treeChess = new Chess(); // keep a board on screen rather than an empty frame
       renderTreeBoard();
       renderTreeDiagram();
+      updateTreeButtons();
       return;
     }
 
@@ -2852,6 +2922,7 @@
     treeLineEl.textContent = treeLineText() || 'Starting position';
     renderTreeBoard();
     renderTreeDiagram();
+    updateTreeButtons();
 
     const node = treeNode();
     const yourMove = treeChess.turn() === treeColor;
@@ -2867,12 +2938,12 @@
     const single = node.children.length === 1;
     if(yourMove){
       treeStatusEl.textContent = single
-        ? 'Your move — one move in this opening.'
-        : 'Your move — ' + node.children.length + ' options saved here, pick one.';
+        ? 'Your move — one move in this opening. Press → to play it.'
+        : 'Your move — ' + node.children.length + ' options here. Play one on the board, or pick below.';
     }else{
       treeStatusEl.textContent = single
-        ? 'They play one move here.'
-        : 'They have ' + node.children.length + ' replies in your lines — pick one to follow.';
+        ? 'They play one move here. Press → to continue.'
+        : 'They have ' + node.children.length + ' replies in your lines. Play one on the board, or pick below.';
     }
     treeStatusEl.className = 'status info';
 
@@ -2882,7 +2953,7 @@
       b.className = yourMove ? 'primary' : 'ghost';
       const label = single ? 'Next move: ' + child.move : child.move;
       b.textContent = label + (child.lines > 1 ? ' (' + child.lines + ' lines)' : '');
-      b.addEventListener('click', () => { treePath.push(child); renderTreeNode(); });
+      b.addEventListener('click', () => treeAdvanceTo(child));
       treeOptionsEl.appendChild(b);
     });
 
@@ -2896,7 +2967,34 @@
     }
   }
 
-  $('treeBackBtn').addEventListener('click', () => { if(treePath.length){ treePath.pop(); renderTreeNode(); } });
+  // Forward only works when the line doesn't branch — with a choice you pick a move instead,
+  // on the board or from the options.
+  function treeOnlyChild(){
+    if(treeFolder === null || !treeRoot) return null;
+    const node = treeNode();
+    return node.children.length === 1 ? node.children[0] : null;
+  }
+
+  function updateTreeButtons(){
+    $('treeBackBtn').disabled = treePath.length === 0;
+    $('treeResetBtn').disabled = treePath.length === 0;
+    $('treeForwardBtn').disabled = !treeOnlyChild();
+  }
+
+  function treeBack(){ if(treePath.length){ treePath.pop(); renderTreeNode(); } }
+  function treeForward(){
+    const only = treeOnlyChild();
+    if(only){ treeAdvanceTo(only); return; }
+    if(treeFolder === null || !treeRoot) return;
+    const node = treeNode();
+    if(node.children.length > 1){
+      treeStatusEl.textContent = 'This is a branch — play a move on the board, or pick one below.';
+      treeStatusEl.className = 'status info';
+    }
+  }
+
+  $('treeBackBtn').addEventListener('click', treeBack);
+  $('treeForwardBtn').addEventListener('click', treeForward);
   $('treeResetBtn').addEventListener('click', () => { treePath = []; renderTreeNode(); });
 
   // ============================================================
@@ -2946,6 +3044,12 @@
       // Left = same as the Undo last move button; Right = redo the move that undid.
       if(e.key === 'ArrowLeft') undoEditMove();
       else redoEditMove();
+    } else if(tabName === 'tree'){
+      if(treeFolder === null || !treeRoot) return;
+      e.preventDefault();
+      // Left walks back up the tree; right plays on when the line doesn't branch.
+      if(e.key === 'ArrowLeft') treeBack();
+      else treeForward();
     }
   });
 
