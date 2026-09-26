@@ -1940,7 +1940,11 @@
       }
       saveEngineCache();
       renderEngineInfo();
-      if(engineOn && engineStatus === 'ready'){ analyzeEditPosition(); maybePrescan(); }
+      // If analysis asked this editor/prescan job to stop so it could take the engine, it
+      // has to be handed over here — analyzeEditPosition() and maybePrescan() both stand
+      // down while anaActive, so without this the analysis board waits forever.
+      if(anaActive) anaAnalyze();
+      else if(engineOn && engineStatus === 'ready'){ analyzeEditPosition(); maybePrescan(); }
       return;
     }
     if(line.indexOf('info ') === 0){
@@ -2219,7 +2223,7 @@
 
   // Turns one raw PGN into an analysable game, or null if it doesn't qualify.
   // `variant` defaults to 'chess' so the puzzle pipeline behaves exactly as before.
-  function pzPrepGame(rec, username, variant){
+  function pzPrepGame(rec, username, variant, minPlies){
     const parsed = pzParsePgn(rec.pgn);
     const h = parsed.headers;
     const want = variant || 'chess';
@@ -2248,7 +2252,9 @@
       ucis.push(mv.from + mv.to + (mv.promotion || ''));
       sans.push(mv.san);
     }
-    if(ucis.length < PZ_SKIP_OPENING + 4) return null;            // too short to mine
+    // Too short to mine puzzles from — but the analysis loader passes 1, since short games
+    // are still worth looking at and three-check blitz often ends inside five moves.
+    if(ucis.length < (minPlies === undefined ? PZ_SKIP_OPENING + 4 : minPlies)) return null;
     return {
       ucis: ucis, sans: sans, userColor: userColor,
       elo: isNaN(elo) ? null : elo,
@@ -2280,7 +2286,7 @@
   // `variant` defaults to 'chess'. For three-check, Lichess exposes it as its own perfType
   // (a variant, not a speed), while Chess.com keeps it under `rules` with a normal
   // time_class — so the speed filter only applies to standard chess.
-  async function pzFetchGames(site, user, speed, want, variant){
+  async function pzFetchGames(site, user, speed, want, variant, onProgress){
     const v = variant || 'chess';
     if(site === 'lichess'){
       const perf = v === 'chess' ? speed : 'threeCheck';
@@ -2297,8 +2303,12 @@
     if(!ar.ok) throw new Error('Chess.com returned ' + ar.status + '.');
     const archives = ((await ar.json()).archives) || [];
     const out = [];
-    const stopAt = Math.max(0, archives.length - 6); // at most 6 months back
+    // Standard games are plentiful, so six months keeps the puzzle scan quick. A variant
+    // may be spread over years — this account's three-check games are from 2023 and 2025 —
+    // so for those search the whole history instead of silently finding nothing.
+    const stopAt = v === 'chess' ? Math.max(0, archives.length - 6) : 0;
     for(let i = archives.length - 1; i >= stopAt && out.length < want; i--){
+      if(onProgress) onProgress(archives[i].split('/').slice(-2).join('-'), out.length);
       const r = await fetch(archives[i]);
       if(!r.ok) break;
       const games = ((await r.json()).games) || [];
@@ -3273,6 +3283,7 @@
     }
     if(!job || job.cp === null || job.key !== anaKey()){
       anaEngineInfoEl.textContent = 'Thinking…';
+      anaEvalBadge.textContent = '…'; // never leave the previous position's eval on screen
       return;
     }
     const white = job.turn === 'w' ? job.cp : -job.cp;
@@ -3396,9 +3407,13 @@
     $('anaLoadBtn').disabled = true;
     anaSetMsg('Fetching your ' + (variant === 'chess' ? speed + ' games' : 'three-check games') + '…', '');
     try{
-      const raw = await pzFetchGames(site, user, speed, 30, variant);
+      // Searching a variant walks the whole archive history, which can be dozens of
+      // requests, so report progress rather than looking frozen.
+      const raw = await pzFetchGames(site, user, speed, 30, variant, (month, found) => {
+        anaSetMsg('Searching ' + month + '… ' + found + ' found so far', '');
+      });
       const games = [];
-      raw.forEach(rec => { const g = pzPrepGame(rec, user, variant); if(g) games.push(g); });
+      raw.forEach(rec => { const g = pzPrepGame(rec, user, variant, 1); if(g) games.push(g); });
       if(!games.length){
         anaSetMsg('No ' + (variant === 'chess' ? 'standard' : 'three-check') + ' games found for that account.', 'err');
         anaGameListEl.innerHTML = '';
