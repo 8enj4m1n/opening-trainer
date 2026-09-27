@@ -182,6 +182,10 @@
   .pz-item .pz-sub{color:var(--muted);font-size:11.5px;font-family:'JetBrains Mono',monospace;margin-top:3px;}
   .pz-item .pz-tick{color:var(--felt);font-weight:700;}
 
+  /* Bot line picker */
+  .bot-pick{display:flex;align-items:center;gap:8px;font-size:13.5px;padding:5px 2px;cursor:pointer;}
+  .bot-pick input{accent-color:var(--brass);}
+
   /* Repertoire tree */
   .tree-group{border:1px solid var(--line);border-radius:8px;padding:11px 13px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;cursor:pointer;}
   .tree-group:hover{border-color:var(--brass);}
@@ -317,7 +321,27 @@
       <div class="progress-note" id="anaLine"></div>
     </div>
 
-    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit / Puzzles / Tree / Analysis) -->
+    <!-- Left (Bot tab): play your repertoire against a bot, then play the game out -->
+    <div class="board-card" id="botCard" style="display:none;">
+      <div class="board-header">
+        <div class="drill-name" id="botTitle">Play a bot</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="side-badge" id="botChecksBadge" style="display:none;">Checks —</div>
+          <div class="side-badge" id="botBookBadge">—</div>
+        </div>
+      </div>
+      <div class="board-outer"><div class="board" id="botBoard"></div></div>
+      <div class="status info" id="botStatus">Pick some lines in the panel, then start a game.</div>
+      <div class="board-actions">
+        <button class="primary" id="botNewBtn" type="button">New game</button>
+        <button class="ghost" id="botGoBackBtn" type="button" style="display:none;">Go back</button>
+        <button class="ghost" id="botHintBtn" type="button" disabled>Hint</button>
+        <button class="ghost" id="botResignBtn" type="button" style="display:none;">End game</button>
+      </div>
+      <div class="progress-note" id="botLine"></div>
+    </div>
+
+    <!-- Right: tabbed panel (Practice scoresheet / Library / Add-edit / Puzzles / Tree / Analysis / Bot) -->
     <div class="panel-card">
       <div class="tabs">
         <button class="tab active" data-tab="practice">Practice</button>
@@ -326,6 +350,7 @@
         <button class="tab" data-tab="puzzles">Puzzles</button>
         <button class="tab" data-tab="tree">Tree</button>
         <button class="tab" data-tab="analysis">Analysis</button>
+        <button class="tab" data-tab="bot">Bot</button>
       </div>
 
       <div id="tab-practice">
@@ -507,6 +532,30 @@
           </div>
         </details>
       </div>
+
+      <div id="tab-bot" style="display:none;">
+        <p class="hint" style="margin-bottom:14px;">The bot answers with the lines you tick below, picking a different one each game. Once your repertoire runs out it keeps playing at the strength you choose, so you can play the position out.</p>
+
+        <div class="filter-row" id="botColorFilter">
+          <button class="active" data-botcolor="w" type="button">Play as White</button>
+          <button data-botcolor="b" type="button">Play as Black</button>
+        </div>
+
+        <div class="field">
+          <label for="botStrengthSel">Bot strength once out of book</label>
+          <select id="botStrengthSel"></select>
+          <p class="hint" id="botStrengthNote"></p>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:16px 0 8px;gap:8px;flex-wrap:wrap;">
+          <span style="font-size:12.5px;color:var(--muted);" id="botPoolNote">No lines selected</span>
+          <span style="display:flex;gap:6px;">
+            <button class="ghost" id="botSelectAllBtn" type="button" style="padding:4px 10px;font-size:12px;">Select all</button>
+            <button class="ghost" id="botClearBtn" type="button" style="padding:4px 10px;font-size:12px;">Clear</button>
+          </span>
+        </div>
+        <div id="botPicker"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -528,10 +577,11 @@
   //   9. PUZZLES        — mistakes mined from your chess.com / lichess games
   //  10. TREE           — saved lines merged into a walkable repertoire tree
   //  11. ANALYSIS       — free board with live engine eval, and past games
-  //  12. FOCUS MODE     — fullscreen practice view
-  //  13. ARROW KEYS     — practice review + editor undo/redo
-  //  14. ERROR REPORTING (Sentry)
-  //  15. INIT
+  //  12. BOT            — play your repertoire, then play the position out
+  //  13. FOCUS MODE     — fullscreen practice view
+  //  14. ARROW KEYS     — practice review + editor undo/redo
+  //  15. ERROR REPORTING (Sentry)
+  //  16. INIT
   // ============================================================
 
   // ============================================================
@@ -963,6 +1013,11 @@
     renderTreeList();
     renderTreeNode();
     anaSyncMode();
+    // Strength levels and the selectable lines both differ by mode, and a game in progress
+    // belongs to the old one.
+    botPlaying = false; botPending = false; botGen++;
+    renderBotStrength();
+    if(botActive){ renderBotPicker(); renderBot(); }
     switchEngineVariant();
   }
   modeBtn.addEventListener('click', () => {
@@ -1392,18 +1447,21 @@
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       const t = tab.dataset.tab;
-      ['practice','library','add','puzzles','tree','analysis'].forEach(name => { $('tab-'+name).style.display = (name === t) ? 'block' : 'none'; });
+      ['practice','library','add','puzzles','tree','analysis','bot'].forEach(name => { $('tab-'+name).style.display = (name === t) ? 'block' : 'none'; });
       if(t === 'library') renderLibraryTab();
       if(t === 'add'){ if(engineOn) loadEngine(); renderEditBoard(); renderEditLedger(); }
       // Puzzles, Tree and Analysis each swap the whole left-hand board card, so they get the
       // same big-board layout as drills instead of a cramped one inside the side panel.
-      const bigBoardTab = (t === 'puzzles' || t === 'tree' || t === 'analysis');
+      const bigBoardTab = (t === 'puzzles' || t === 'tree' || t === 'analysis' || t === 'bot');
       $('drillCard').style.display = bigBoardTab ? 'none' : 'block';
       $('puzzleCard').style.display = t === 'puzzles' ? 'block' : 'none';
       $('treeCard').style.display = t === 'tree' ? 'block' : 'none';
       $('anaCard').style.display = t === 'analysis' ? 'block' : 'none';
+      $('botCard').style.display = t === 'bot' ? 'block' : 'none';
       if(t === 'puzzles'){ renderPuzzleList(); renderPuzzleBoard(); }
       if(t === 'tree'){ renderTreeList(); renderTreeNode(); }
+      botActive = (t === 'bot');
+      if(botActive){ renderBotStrength(); renderBotPicker(); renderBot(); }
 
       // Hand the engine over explicitly. Without this the editor would fight an analysis
       // search still in flight, and its bestmove would be routed to the wrong handler.
@@ -1918,16 +1976,22 @@
         return;
       }
       engine.postMessage('ucinewgame');
-      // Analysis owns the engine whenever its tab is open, so it gets first refusal here —
-      // otherwise loading the engine, or switching game mode, would silently stop analysis.
-      if(anaActive){ anaAnalyze(); return; }
-      analyzeEditPosition();
-      maybePrescan();
+      dispatchEngine();
+      return;
+    }
+    // The option list arrives during the uci handshake, before any search is running, so
+    // read the engine's real UCI_Elo bounds rather than assuming a Stockfish version.
+    if(line.indexOf('option name UCI_Elo') === 0){
+      const mn = line.match(/\bmin (\d+)/), mx = line.match(/\bmax (\d+)/);
+      if(mn) botEloMin = parseInt(mn[1], 10);
+      if(mx) botEloMax = parseInt(mx[1], 10);
+      renderBotStrength();
       return;
     }
     if(engineStatus === 'failed' || !engineBusy) return;
     if(engineBusy.scan){ onScanLine(line); return; }
     if(engineBusy.ana){ onAnalysisLine(line); return; }
+    if(engineBusy.bot){ onBotLine(line); return; }
     if(line.indexOf('bestmove') === 0){
       const finished = engineBusy; engineBusy = null;
       const mv = line.split(' ')[1];
@@ -1940,11 +2004,7 @@
       }
       saveEngineCache();
       renderEngineInfo();
-      // If analysis asked this editor/prescan job to stop so it could take the engine, it
-      // has to be handed over here — analyzeEditPosition() and maybePrescan() both stand
-      // down while anaActive, so without this the analysis board waits forever.
-      if(anaActive) anaAnalyze();
-      else if(engineOn && engineStatus === 'ready'){ analyzeEditPosition(); maybePrescan(); }
+      dispatchEngine();
       return;
     }
     if(line.indexOf('info ') === 0){
@@ -2015,6 +2075,26 @@
   // the switch is confirmed. The stale search's eventual bestmove is ignored (engineBusy
   // is cleared immediately), and the prescan queue is rebuilt so it re-targets positions
   // under the new variant's (separately cached) keys.
+  // One place that decides who gets the engine next. Every bestmove and every readyok comes
+  // through here. Adding consumers by patching each tail individually is what caused the
+  // analysis stall, so the priority order lives here and nowhere else.
+  function dispatchEngine(){
+    if(!engine || engineStatus !== 'ready' || engineBusy) return;
+    const who = scanActive ? 'scan' : (anaActive ? 'ana' : (botPending ? 'bot' : 'editor'));
+    // Strength limits are global engine options and outlast the bot's turn, so anything
+    // that isn't the bot must get a full-strength engine back. Safe here: nothing running.
+    if(strengthLimited && who !== 'bot'){
+      engine.postMessage('setoption name UCI_LimitStrength value false');
+      engine.postMessage('setoption name Skill Level value 20');
+      strengthLimited = false;
+    }
+    if(who === 'scan'){ pumpScan(); return; }
+    if(who === 'ana'){ anaAnalyze(); return; }
+    if(who === 'bot'){ botThink(); return; }
+    analyzeEditPosition();
+    maybePrescan();
+  }
+
   function switchEngineVariant(){
     if(!engine) return;
     if(engineBusy){ engineBusy.stopped = true; engine.postMessage('stop'); engineBusy = null; }
@@ -3315,9 +3395,7 @@
     const job = engineBusy;
     if(line.indexOf('bestmove') === 0){
       engineBusy = null;
-      if(anaActive && anaOn && engineStatus === 'ready'){ anaAnalyze(); return; }
-      // Left the tab or switched off: hand the engine back to its other users.
-      if(!anaActive){ analyzeEditPosition(); maybePrescan(); }
+      dispatchEngine();
       return;
     }
     if(job.stopped || line.indexOf('info ') !== 0) return;
@@ -3477,7 +3555,403 @@
   });
 
   // ============================================================
-  // 12. FOCUS MODE — fullscreen practice view
+  // 12. BOT — play your own repertoire, then play the position out
+  //
+  // The bot answers from a pool of drills you tick. While a line is still in that pool it
+  // replies with a real saved move, weighted so every selected drill comes up about equally
+  // often. When the pool runs dry the engine takes over at a chosen strength, so the game
+  // continues past the end of the book.
+  // ============================================================
+  const BOT_POOL_KEY = 'repertoire-bot-pool';
+  const BOT_LEVEL_KEY = 'repertoire-bot-level';
+  let botPool = [];
+  try{ botPool = JSON.parse(localStorage.getItem(BOT_POOL_KEY) || '[]') || []; }catch(e){ botPool = []; }
+  let botColor = 'w';
+  let botLevelIdx = 0;
+  try{ botLevelIdx = parseInt(localStorage.getItem(BOT_LEVEL_KEY) || '1', 10) || 0; }catch(e){ botLevelIdx = 1; }
+  let botEloMin = 1350, botEloMax = 2850;   // replaced by the engine's real bounds at handshake
+  let strengthLimited = false;              // engine currently running weakened
+
+  let botRoot = null, botNode = null;
+  let botChess = new Chess();
+  let botMoves = [];
+  let botChecks = { w: 0, b: 0 };
+  let botSel = null, botTargets = [];
+  let botAwaitingGoBack = false;
+  let botActive = false;    // Bot tab open
+  let botPending = false;   // waiting on the engine for the bot's move
+  let botPlaying = false;
+  let botGen = 0;           // bumped per game, so a stale engine reply is discarded
+
+  const botBoardEl = $('botBoard'), botStatusEl = $('botStatus'), botLineEl = $('botLine'),
+        botTitleEl = $('botTitle'), botBookBadge = $('botBookBadge'), botChecksBadge = $('botChecksBadge'),
+        botPickerEl = $('botPicker'), botPoolNote = $('botPoolNote'), botStrengthSel = $('botStrengthSel');
+
+  function saveBotPool(){ try{ localStorage.setItem(BOT_POOL_KEY, JSON.stringify(botPool)); }catch(e){} }
+
+  // Levels below the engine's UCI_Elo floor use Skill Level instead. That matters here:
+  // this account's standard ratings sit in the 700-1300 range, under any Stockfish floor.
+  function botLevels(){
+    if(gameMode === 'three-check'){
+      return [
+        { label: 'Beginner', skill: 0 }, { label: 'Easy', skill: 4 },
+        { label: 'Club', skill: 8 }, { label: 'Strong', skill: 14 },
+        { label: 'Full strength', skill: 20 }
+      ];
+    }
+    const out = [
+      { label: 'Beginner', skill: 0 }, { label: 'Easy', skill: 3 }, { label: 'Casual', skill: 6 }
+    ];
+    [1400, 1600, 1800, 2000, 2200, 2500].forEach(e => {
+      if(e >= botEloMin && e <= botEloMax) out.push({ label: 'Elo ' + e, elo: e });
+    });
+    out.push({ label: 'Full strength', skill: 20 });
+    return out;
+  }
+
+  function renderBotStrength(){
+    const levels = botLevels();
+    if(botLevelIdx >= levels.length) botLevelIdx = levels.length - 1;
+    botStrengthSel.innerHTML = levels.map((l, i) =>
+      '<option value="' + i + '"' + (i === botLevelIdx ? ' selected' : '') + '>' + escapeHtml(l.label) + '</option>').join('');
+    $('botStrengthNote').textContent = gameMode === 'three-check'
+      ? 'Three-check has no Elo scale — the engine\'s Elo setting is calibrated on standard chess only, so these are strength levels instead.'
+      : 'Levels below Elo ' + botEloMin + ' use the engine\'s skill setting, since its Elo scale stops there.';
+  }
+
+  function botApplyStrength(){
+    const lvl = botLevels()[botLevelIdx];
+    if(!lvl || !engine) return;
+    if(lvl.elo){
+      engine.postMessage('setoption name Skill Level value 20');
+      engine.postMessage('setoption name UCI_LimitStrength value true');
+      engine.postMessage('setoption name UCI_Elo value ' + lvl.elo);
+    }else{
+      engine.postMessage('setoption name UCI_LimitStrength value false');
+      engine.postMessage('setoption name Skill Level value ' + lvl.skill);
+    }
+    strengthLimited = true;
+  }
+
+  // ---- Pool selection ----
+  function botDrills(){
+    return db.drills.filter(d => d.userColor === botColor &&
+      (!d.folder || folderMode(d.folder) === gameMode));
+  }
+  function botSelected(){ return botDrills().filter(d => botPool.indexOf(d.id) !== -1); }
+
+  function renderBotPicker(){
+    const drills = botDrills();
+    const chosen = botSelected();
+    botPoolNote.textContent = chosen.length
+      ? chosen.length + ' line' + (chosen.length === 1 ? '' : 's') + ' selected'
+      : 'No lines selected';
+    if(!drills.length){
+      botPickerEl.innerHTML = '<div class="empty">No lines saved for this colour in this game mode.</div>';
+      return;
+    }
+    const groups = {};
+    drills.forEach(d => { (groups[d.folder || ''] = groups[d.folder || ''] || []).push(d); });
+    botPickerEl.innerHTML = '';
+    Object.keys(groups).sort((a, b) => (a || '￿').localeCompare(b || '￿')).forEach(folder => {
+      const list = groups[folder];
+      const on = list.filter(d => botPool.indexOf(d.id) !== -1).length;
+      const details = document.createElement('details');
+      details.className = 'folder-group';
+      if(on) details.open = true;
+      const summary = document.createElement('summary');
+      const label = document.createElement('span');
+      label.textContent = (folder || 'Uncategorized') + ' (' + on + '/' + list.length + ')';
+      summary.appendChild(label);
+      const all = document.createElement('button');
+      all.className = 'ghost folder-mode-btn'; all.type = 'button';
+      all.textContent = on === list.length ? 'None' : 'All';
+      all.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const ids = list.map(d => d.id);
+        botPool = on === list.length
+          ? botPool.filter(id => ids.indexOf(id) === -1)
+          : botPool.concat(ids.filter(id => botPool.indexOf(id) === -1));
+        saveBotPool(); renderBotPicker();
+      });
+      summary.appendChild(all);
+      details.appendChild(summary);
+      const inner = document.createElement('div');
+      inner.className = 'drill-list';
+      list.forEach(d => {
+        const row = document.createElement('label');
+        row.className = 'bot-pick';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = botPool.indexOf(d.id) !== -1;
+        cb.addEventListener('change', () => {
+          if(cb.checked){ if(botPool.indexOf(d.id) === -1) botPool.push(d.id); }
+          else botPool = botPool.filter(id => id !== d.id);
+          saveBotPool(); renderBotPicker();
+        });
+        row.appendChild(cb);
+        const txt = document.createElement('span');
+        txt.textContent = d.name + '  (' + d.moves.length + ' ply)';
+        row.appendChild(txt);
+        inner.appendChild(row);
+      });
+      details.appendChild(inner);
+      botPickerEl.appendChild(details);
+    });
+  }
+
+  // ---- Game flow ----
+  function botOutOfBook(){ return botNode === null; }
+
+  function botGameOver(){
+    if(gameMode === 'three-check' &&
+       (botChecks.w >= CHECKS_TO_WIN || botChecks.b >= CHECKS_TO_WIN)) return true;
+    return botChess.game_over();
+  }
+
+  function botStart(){
+    const chosen = botSelected();
+    if(!chosen.length){ botSetStatus('Tick at least one line in the panel first.', 'err'); return; }
+    botRoot = buildTree(chosen);
+    botNode = botRoot;
+    botChess = new Chess();
+    botMoves = []; botChecks = { w: 0, b: 0 };
+    botSel = null; botTargets = []; botAwaitingGoBack = false;
+    botPlaying = true; botPending = false;
+    botGen++;
+    botTitleEl.textContent = 'Playing as ' + (botColor === 'w' ? 'White' : 'Black') +
+      ' · ' + chosen.length + ' line' + (chosen.length === 1 ? '' : 's');
+    renderBot();
+    botStep();
+  }
+
+  function botApply(san){
+    const mover = botChess.turn();
+    const mv = botChess.move(san, { sloppy: true });
+    if(!mv) return null;
+    botMoves.push(mv.san);
+    if(botChess.in_check()) botChecks[mover]++;
+    if(botNode){
+      const child = botNode.children.find(c => stripSym(c.move) === stripSym(mv.san));
+      botNode = child || null;      // off the end of the book
+      if(botNode && !botNode.children.length) botNode = null;
+    }
+    playMoveSound(mv, botChess);
+    return mv;
+  }
+
+  // The bot's turn: answer from the book if it can, otherwise ask the engine.
+  function botStep(){
+    if(!botPlaying) return;
+    if(botGameOver()){ botFinish(); return; }
+    if(botChess.turn() === botColor){ renderBot(); return; }   // your move
+    if(botNode && botNode.children.length){
+      // Weight by how many drills run through each reply, so every selected line comes up
+      // about as often. Uniform choice would over-serve short side branches.
+      const kids = botNode.children;
+      let total = 0; kids.forEach(k => { total += Math.max(1, k.lines); });
+      let r = Math.random() * total, pick = kids[0];
+      for(const k of kids){ r -= Math.max(1, k.lines); if(r <= 0){ pick = k; break; } }
+      // Capture the generation: starting a new game during this pause must not drop the
+      // old game's reply onto the new board.
+      const gen = botGen;
+      setTimeout(() => {
+        if(!botPlaying || gen !== botGen) return;
+        botApply(pick.move);
+        renderBot();
+        botStep();
+      }, 350);
+      return;
+    }
+    // Out of book — the engine plays on at the chosen strength.
+    botPending = true;
+    renderBot();
+    if(!engine){ loadEngine(); return; }   // dispatchEngine picks this up at readyok
+    dispatchEngine();
+  }
+
+  function botThink(){
+    if(!botPending || !botPlaying || engineBusy) return;
+    botApplyStrength();
+    const ucis = [];
+    const t = new Chess();
+    botMoves.forEach(s => { const m = t.move(s, { sloppy: true }); if(m) ucis.push(m.from + m.to + (m.promotion || '')); });
+    engineBusy = { bot: true, gen: botGen };
+    engine.postMessage(ucis.length ? 'position startpos moves ' + ucis.join(' ') : 'position startpos');
+    engine.postMessage('go movetime 900');
+  }
+
+  function onBotLine(line){
+    if(line.indexOf('bestmove') !== 0) return;
+    const job = engineBusy;
+    engineBusy = null;
+    const uci = line.split(' ')[1];
+    // A new game while the engine was thinking must not receive the old game's move.
+    if(job.gen === botGen && botPlaying && botPending && uci && uci !== '(none)'){
+      botPending = false;
+      const t = new Chess(botChess.fen());
+      const mv = t.move({ from: uci.slice(0,2), to: uci.slice(2,4), promotion: uci.length > 4 ? uci[4] : undefined });
+      if(mv){ botApply(mv.san); renderBot(); botStep(); }
+      else { botFinish(); }
+    }else{
+      botPending = false;
+    }
+    dispatchEngine();
+  }
+
+  function botFinish(){
+    botPlaying = false; botPending = false;
+    let msg;
+    if(gameMode === 'three-check' && (botChecks.w >= CHECKS_TO_WIN || botChecks.b >= CHECKS_TO_WIN)){
+      const winner = botChecks.w >= CHECKS_TO_WIN ? 'w' : 'b';
+      msg = (winner === botColor ? 'You win' : 'The bot wins') + ' by three checks.';
+    }else if(botChess.in_checkmate()){
+      msg = (botChess.turn() === botColor ? 'The bot wins by checkmate.' : 'You win by checkmate.');
+    }else msg = 'Game over — drawn.';
+    botSetStatus(msg + ' Press New game for another.', 'ok');
+    renderBot();
+  }
+
+  function botSetStatus(msg, kind){ botStatusEl.textContent = msg; botStatusEl.className = 'status ' + (kind || 'info'); }
+
+  // ---- Your moves ----
+  function onBotSquareClick(sqName){
+    if(!botPlaying || botAwaitingGoBack || botPending) return;
+    if(botChess.turn() !== botColor || botGameOver()) return;
+    const pickUp = () => {
+      const cell = botChess.get(sqName);
+      if(cell && cell.color === botColor){
+        botSel = sqName; botTargets = botChess.moves({ square: sqName, verbose: true }); renderBotBoard();
+      }
+    };
+    if(botSel === null){ pickUp(); return; }
+    if(sqName === botSel){ botSel = null; botTargets = []; renderBotBoard(); return; }
+    const target = botTargets.find(t => t.to === sqName);
+    if(!target){ pickUp(); return; }
+    const probe = new Chess(botChess.fen());
+    const mv = probe.move({ from: botSel, to: sqName, promotion: 'q' });
+    botSel = null; botTargets = [];
+    if(!mv){ renderBotBoard(); return; }
+
+    // Still in the book: your move has to be one you actually saved.
+    if(botNode && !botNode.children.some(c => stripSym(c.move) === stripSym(mv.san))){
+      botAwaitingGoBack = true;
+      sfxWrong();
+      botSetStatus(mv.san + ' isn\'t in the lines you picked — go back and try again.', 'err');
+      renderBot();
+      return;
+    }
+    botApply(mv.san);
+    renderBot();
+    botStep();
+  }
+
+  // ---- Rendering ----
+  function renderBotBoard(){
+    const arr = botChess.board();
+    const flip = botColor === 'b';
+    const rowOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    const colOrder = flip ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
+    const live = botPlaying && !botAwaitingGoBack && !botPending &&
+                 botChess.turn() === botColor && !botGameOver();
+    botBoardEl.innerHTML = '';
+    rowOrder.forEach((r, ri) => {
+      colOrder.forEach((c, ci) => {
+        const isLight = (r + c) % 2 === 0;
+        const sqName = FILES[c] + (8 - r);
+        const cell = arr[r][c];
+        const div = document.createElement('div');
+        div.className = 'sq ' + (isLight ? 'light' : 'dark');
+        div.dataset.square = sqName;
+        if(ci === 0){ const rl=document.createElement('span'); rl.className='coord rank'; rl.textContent=8-r; div.appendChild(rl); }
+        if(ri === 7){ const fl=document.createElement('span'); fl.className='coord file'; fl.textContent=FILES[c]; div.appendChild(fl); }
+        if(cell){
+          const p=document.createElement('span'); p.className='piece '+cell.color;
+          p.textContent=PIECE_GLYPH[cell.color][cell.type]; div.appendChild(p);
+          if(gameMode === 'three-check' && cell.type === 'k'){
+            const left = Math.max(0, CHECKS_TO_WIN - (botChecks[cell.color === 'w' ? 'b' : 'w'] || 0));
+            const cc = document.createElement('span'); cc.className='check-count'; cc.textContent = left;
+            div.appendChild(cc);
+          }
+        }
+        if(botSel === sqName) div.classList.add('selected');
+        const target = botTargets.find(t => t.to === sqName);
+        if(target){ const mk=document.createElement('span'); mk.className = cell ? 'ring' : 'dot'; div.appendChild(mk); }
+        const clickable = live && ((cell && cell.color === botColor) || target);
+        if(clickable){
+          div.classList.add('selectable'); div.tabIndex = 0;
+          div.addEventListener('click', () => onBotSquareClick(sqName));
+          div.addEventListener('keydown', (e) => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); onBotSquareClick(sqName);} });
+        }
+        botBoardEl.appendChild(div);
+      });
+    });
+  }
+
+  function renderBot(){
+    botChecksBadge.style.display = gameMode === 'three-check' ? '' : 'none';
+    if(gameMode === 'three-check') botChecksBadge.textContent = 'Checks — W ' + botChecks.w + ' · B ' + botChecks.b;
+    botBookBadge.textContent = !botPlaying ? '—' : (botOutOfBook() ? 'Out of book' : 'In your lines');
+    $('botGoBackBtn').style.display = botAwaitingGoBack ? 'inline-block' : 'none';
+    $('botResignBtn').style.display = botPlaying ? 'inline-block' : 'none';
+    $('botHintBtn').disabled = !botPlaying || botAwaitingGoBack || botPending ||
+                               botOutOfBook() || botChess.turn() !== botColor;
+    let line = '';
+    botMoves.forEach((san, i) => { if(i % 2 === 0) line += (i/2 + 1) + '. '; line += san + ' '; });
+    botLineEl.textContent = line.trim();
+    if(botPlaying && !botAwaitingGoBack){
+      if(botPending) botSetStatus('The bot is thinking…', 'info');
+      else if(botChess.turn() === botColor){
+        botSetStatus(botOutOfBook()
+          ? 'Out of your repertoire — play on against the engine.'
+          : 'Your move, from the lines you picked.', 'info');
+      }
+    }
+    renderBotBoard();
+  }
+
+  // ---- Wiring ----
+  $('botColorFilter').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-botcolor]');
+    if(!btn) return;
+    botColor = btn.dataset.botcolor;
+    [...$('botColorFilter').children].forEach(b => b.classList.toggle('active', b === btn));
+    botPlaying = false; botPending = false; botGen++;
+    renderBotPicker(); renderBot();
+  });
+  $('botSelectAllBtn').addEventListener('click', () => {
+    botDrills().forEach(d => { if(botPool.indexOf(d.id) === -1) botPool.push(d.id); });
+    saveBotPool(); renderBotPicker();
+  });
+  $('botClearBtn').addEventListener('click', () => {
+    const ids = botDrills().map(d => d.id);
+    botPool = botPool.filter(id => ids.indexOf(id) === -1);
+    saveBotPool(); renderBotPicker();
+  });
+  botStrengthSel.addEventListener('change', () => {
+    botLevelIdx = parseInt(botStrengthSel.value, 10) || 0;
+    try{ localStorage.setItem(BOT_LEVEL_KEY, String(botLevelIdx)); }catch(e){}
+  });
+  $('botNewBtn').addEventListener('click', botStart);
+  $('botResignBtn').addEventListener('click', () => {
+    botPlaying = false; botPending = false; botGen++;
+    botSetStatus('Game ended. Press New game to play another.', 'info');
+    renderBot();
+  });
+  $('botGoBackBtn').addEventListener('click', () => {
+    if(!botAwaitingGoBack) return;
+    botAwaitingGoBack = false;
+    botSetStatus('Try again — play a move from the lines you picked.', 'info');
+    renderBot();
+  });
+  $('botHintBtn').addEventListener('click', () => {
+    if(!botNode || !botNode.children.length) return;
+    const moves = botNode.children.map(c => c.move);
+    botSetStatus('Your repertoire plays: ' + moves.join(' or ') + '.', 'info');
+  });
+
+  // ============================================================
+  // 13. FOCUS MODE — fullscreen practice view
   // ============================================================
   function setFocusMode(on){
     wrapEl.classList.toggle('focus-mode', on);
@@ -3501,7 +3975,7 @@
   });
 
   // ============================================================
-  // 13. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
+  // 14. ARROW KEYS — practice review (←/→) + editor undo/redo (←/→)
   // ============================================================
   document.addEventListener('keydown', (e) => {
     if(e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -3537,7 +4011,7 @@
   });
 
   // ============================================================
-  // 14. ERROR REPORTING — Sentry manual "Report an issue" button
+  // 15. ERROR REPORTING — Sentry manual "Report an issue" button
   // ============================================================
   const reportBtn = $('reportBtn');
   reportBtn.addEventListener('click', () => {
@@ -3558,7 +4032,7 @@
   });
 
   // ============================================================
-  // 15. INIT
+  // 16. INIT
   // ============================================================
   async function init(){
     await loadDb();
