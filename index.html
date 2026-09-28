@@ -1887,6 +1887,8 @@
   // ============================================================
   // ---- State ----
   const ENGINE_CACHE_KEY = 'repertoire-engine-cache'; // per-position best move / depth / eval
+  const ENGINE_CACHE_VER_KEY = 'repertoire-engine-cache-version';
+  const ENGINE_CACHE_MAX = 5000;                      // entries kept; shallowest evicted first
   const ENGINE_ON_KEY = 'repertoire-engine-on';       // remembered on/off toggle
   const ENGINE_TARGET_DEPTH = 22;   // default depth every editor position is analysed to
   const ENGINE_PRESCAN_DEPTH = 12;  // basic depth for the automatic library pre-scan
@@ -1911,9 +1913,66 @@
   if(engineOn) engineBtn.textContent = 'Engine: on';
 
   // ---- Position helpers & formatting ----
-  function saveEngineCache(){
-    try{ localStorage.setItem(ENGINE_CACHE_KEY, JSON.stringify(engineCache)); }catch(e){}
+  // The position itself, with the halfmove clock and fullmove number stripped off. Those two
+  // differ between move orders that reach the same position, which is why looking at a
+  // position you had already analysed under a different opening used to start from scratch.
+  // En passant is kept: chess.js sets it after any double push, so a few transpositions
+  // still miss, but merging positions that genuinely differ would be worse than a miss.
+  function posKey(fen, checks, mode){
+    return fen.split(' ').slice(0, 4).join(' ') + '|' + checks.w + '+' + checks.b + '|' + mode;
   }
+
+  // Never downgrade an entry: a depth-70 cloud result must survive a local depth-22 search.
+  function cachePut(key, entry){
+    const cur = engineCache[key];
+    if(cur && (cur.depth || 0) >= entry.depth) return false;
+    engineCache[key] = entry;
+    return true;
+  }
+
+  function trimEngineCache(){
+    const keys = Object.keys(engineCache);
+    if(keys.length <= ENGINE_CACHE_MAX) return;
+    keys.sort((a, b) => (engineCache[a].depth || 0) - (engineCache[b].depth || 0));
+    keys.slice(0, keys.length - ENGINE_CACHE_MAX).forEach(k => delete engineCache[k]);
+  }
+
+  function saveEngineCache(){
+    try{
+      trimEngineCache();
+      localStorage.setItem(ENGINE_CACHE_KEY, JSON.stringify(engineCache));
+    }catch(e){
+      // Out of quota — drop the shallowest half and try once more rather than failing mute.
+      const keys = Object.keys(engineCache)
+        .sort((a, b) => (engineCache[a].depth || 0) - (engineCache[b].depth || 0));
+      keys.slice(0, Math.ceil(keys.length / 2)).forEach(k => delete engineCache[k]);
+      try{ localStorage.setItem(ENGINE_CACHE_KEY, JSON.stringify(engineCache)); }catch(e2){}
+    }
+  }
+
+  // Older entries were keyed with the move counters still in the FEN, so one position could
+  // sit under several keys. Rewrite them once, keeping the deepest where they collide, so
+  // existing work isn't orphaned by the key change.
+  function migrateEngineCache(){
+    let ver = 0;
+    try{ ver = parseInt(localStorage.getItem(ENGINE_CACHE_VER_KEY) || '0', 10) || 0; }catch(e){}
+    if(ver >= 2) return;
+    const out = {};
+    Object.keys(engineCache).forEach(old => {
+      const parts = old.split('|');
+      const fen = (parts[0] || '').split(' ');
+      // Anything before the game-mode toggle existed was three-check, the only mode then.
+      const key = fen.length >= 6
+        ? fen.slice(0, 4).join(' ') + '|' + (parts[1] || '0+0') + '|' + (parts[2] || 'three-check')
+        : old;
+      const cur = out[key];
+      if(!cur || (engineCache[old].depth || 0) > (cur.depth || 0)) out[key] = engineCache[old];
+    });
+    engineCache = out;
+    try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '2'); }catch(e){}
+    saveEngineCache();
+  }
+  migrateEngineCache();
 
   // Cache key includes the three-check tally (the same diagram with different check
   // counts is a different position to the engine) and the game mode, since the engine's
@@ -1930,7 +1989,8 @@
       ucis.push(mv.from + mv.to + (mv.promotion || ''));
       if(t.in_check()) checks[mover]++;
     }
-    return { key: t.fen() + '|' + checks.w + '+' + checks.b + '|' + gameMode, fen: t.fen(), ucis: ucis, turn: t.turn() };
+    return { key: posKey(t.fen(), checks, gameMode), fen: t.fen(), ucis: ucis,
+             turn: t.turn(), checks: checks };
   }
 
   function pvMoveToSan(fen, uci){
@@ -1949,11 +2009,64 @@
 
   function targetOf(key){ return Math.max(ENGINE_TARGET_DEPTH, engineTargets[key] || 0); }
 
+  // ---- Lichess public cloud evaluations ----
+  // Lichess keeps a shared, community-computed evaluation database and serves it with open
+  // CORS. Common positions come back far deeper than anything this page could compute —
+  // depth 70 for 1.e4, depth 30 for three-check — so it's consulted alongside the local
+  // engine and stored in the same cache.
+  const cloudMiss = {};           // positions Lichess has told us it doesn't hold
+  let cloudInFlight = false;
+  let cloudBackoffUntil = 0;
+  let cloudTimer = null;
+
+  // Three-check positions need the check counters appended, "+{White given}+{Black given}".
+  // Verified against the API: the reversed form returns 404, so the order matters.
+  function cloudFen(fen, checks){
+    const base = fen.split(' ').slice(0, 6).join(' ');
+    return gameMode === 'three-check' ? base + ' +' + checks.w + '+' + checks.b : base;
+  }
+
+  function queryCloud(key, fen, checks, onHit){
+    if(cloudMiss[key] || cloudInFlight || Date.now() < cloudBackoffUntil) return;
+    cloudInFlight = true;
+    const url = 'https://lichess.org/api/cloud-eval?fen=' + encodeURIComponent(cloudFen(fen, checks)) +
+                (gameMode === 'three-check' ? '&variant=threeCheck' : '');
+    fetch(url).then(r => {
+      if(r.status === 404){ cloudMiss[key] = 1; return null; }
+      if(r.status === 429){ cloudBackoffUntil = Date.now() + 60000; return null; }
+      return r.ok ? r.json() : null;
+    }).then(d => {
+      cloudInFlight = false;
+      if(!d || !d.pvs || !d.pvs.length) return;
+      const pv = d.pvs[0];
+      const first = (pv.moves || '').split(' ')[0];
+      if(!first) return;
+      const isMate = pv.mate !== undefined && pv.mate !== null;
+      // Lichess reports from White's point of view already, so don't flip it: fmtScore
+      // only negates when told the side to move is Black.
+      const entry = {
+        san: pvMoveToSan(fen, first),
+        depth: d.depth || 0,
+        score: fmtScore(isMate ? 'mate' : 'cp', isMate ? pv.mate : pv.cp, 'w'),
+        src: 'cloud'
+      };
+      if(cachePut(key, entry)){ saveEngineCache(); if(onHit) onHit(); }
+    }).catch(() => { cloudInFlight = false; });
+  }
+
+  // Debounced so holding an arrow key doesn't fire a request per position.
+  function queryCloudSoon(key, fen, checks, onHit){
+    if(cloudTimer) clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(() => queryCloud(key, fen, checks, onHit), 250);
+  }
+
   function renderEngineInfo(){
     const pos = editEnginePos();
     const c = engineCache[pos.key];
     let txt = '';
-    if(c) txt = c.san === '—' ? 'No legal moves here (game over).' : 'Best: ' + c.san + ' · depth ' + c.depth + (c.score ? ' · ' + c.score : '');
+    if(c) txt = c.san === '—' ? 'No legal moves here (game over).'
+      : 'Best: ' + c.san + ' · ' + (c.src === 'cloud' ? 'Lichess cloud' : 'engine') +
+        ' depth ' + c.depth + (c.score ? ' · ' + c.score : '');
     if(engineOn){
       if(engineStatus === 'loading') txt = txt || 'Loading engine (one-time ~1.6 MB)…';
       else if(engineStatus === 'failed') txt = 'Engine unavailable — try fully reloading the page.';
@@ -2016,12 +2129,13 @@
       if(!d || !pv) return;
       const depth = parseInt(d[1], 10);
       const cur = engineCache[engineBusy.key];
-      if(cur && cur.depth >= depth) return;
-      engineCache[engineBusy.key] = {
+      if(cur && (cur.depth || 0) >= depth) return;
+      cachePut(engineBusy.key, {
         san: pvMoveToSan(engineBusy.fen, pv[1]),
         depth: depth,
-        score: sc ? fmtScore(sc[1], parseInt(sc[2], 10), engineBusy.turn) : ''
-      };
+        score: sc ? fmtScore(sc[1], parseInt(sc[2], 10), engineBusy.turn) : '',
+        src: 'engine'
+      });
       saveEngineCache(); // persist each new depth immediately, not just at search end
       renderEngineInfo();
     }
@@ -2111,6 +2225,9 @@
     renderEngineInfo();
     if(!engineOn || engineStatus !== 'ready') return;
     const pos = editEnginePos();
+    // Ask Lichess alongside the local search rather than before it: a network round trip
+    // shouldn't delay analysis, and offline it simply never answers.
+    queryCloudSoon(pos.key, pos.fen, pos.checks, renderEngineInfo);
     const cached = engineCache[pos.key];
     if(cached && (cached.done || cached.depth >= targetOf(pos.key))){ maybePrescan(); return; }
     if(engineBusy){
@@ -2134,7 +2251,7 @@
     db.drills.filter(d => !d.folder || folderMode(d.folder) === gameMode).forEach(drill => {
       const t = new Chess(); const ucis = []; const checks = { w: 0, b: 0 };
       const push = () => {
-        const key = t.fen() + '|' + checks.w + '+' + checks.b + '|' + gameMode;
+        const key = posKey(t.fen(), checks, gameMode);
         if(seen[key]) return; seen[key] = true;
         const c = engineCache[key];
         if(c && (c.done || c.depth >= ENGINE_PRESCAN_DEPTH)) return;
@@ -3249,7 +3366,9 @@
     return anaChess.game_over();
   }
 
-  function anaKey(){ return anaUcis.join(' ') + '|' + gameMode; }
+  function anaKey(){ return anaUcis.join(' ') + '|' + gameMode; }   // identifies a search job
+  // Identifies the position itself, shared with the editor and the cloud lookups.
+  function anaPosKey(){ return posKey(anaChess.fen(), anaChecks, gameMode); }
 
   function anaSetLine(sans, label, url, flip){
     anaMoves = sans.slice();
@@ -3362,8 +3481,17 @@
       return;
     }
     if(!job || job.cp === null || job.key !== anaKey()){
-      anaEngineInfoEl.textContent = 'Thinking…';
-      anaEvalBadge.textContent = '…'; // never leave the previous position's eval on screen
+      // Nothing from this search yet — show whatever the shared memory already knows about
+      // this position, from an earlier visit or from the Lichess cloud.
+      const known = engineCache[anaPosKey()];
+      if(known && known.san && known.san !== '—'){
+        anaEvalBadge.textContent = known.score || '…';
+        anaEngineInfoEl.textContent = (known.src === 'cloud' ? 'Lichess cloud' : 'Known') +
+          ' depth ' + known.depth + ' · best: ' + known.san + ' · searching…';
+      }else{
+        anaEngineInfoEl.textContent = 'Thinking…';
+        anaEvalBadge.textContent = '…'; // never leave the previous position's eval on screen
+      }
       return;
     }
     const white = job.turn === 'w' ? job.cp : -job.cp;
@@ -3384,6 +3512,7 @@
       if(engineBusy.key !== anaKey()){ engineBusy.stopped = true; engine.postMessage('stop'); }
       return;
     }
+    queryCloudSoon(anaPosKey(), anaChess.fen(), anaChecks, () => renderAnaEngine(null));
     engineBusy = { ana: true, key: anaKey(), ucis: anaUcis.slice(), fen: anaChess.fen(),
                    turn: anaChess.turn(), depth: 0, cp: null, pv: null, stopped: false };
     engine.postMessage(anaUcis.length ? 'position startpos moves ' + anaUcis.join(' ') : 'position startpos');
@@ -3408,7 +3537,16 @@
     job.cp = pzScoreToCp(sc[1], parseInt(sc[2], 10));
     const pvm = line.match(/\bpv (.+)$/);
     if(pvm) job.pv = pvm[1].trim().split(/\s+/).filter(t => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(t));
-    if(job.key === anaKey()) renderAnaEngine(job); // only paint the position on screen
+    if(job.key === anaKey()){
+      // Full-strength result, so it belongs in the shared memory alongside the editor's.
+      if(job.pv && job.pv.length){
+        if(cachePut(anaPosKey(), { san: pvMoveToSan(job.fen, job.pv[0]), depth: job.depth,
+                                   score: pzFmtEval(job.turn === 'w' ? job.cp : -job.cp), src: 'engine' })){
+          saveEngineCache();
+        }
+      }
+      renderAnaEngine(job); // only paint the position on screen
+    }
   }
 
   // ---- Rendering ----
