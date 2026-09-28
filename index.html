@@ -1922,13 +1922,38 @@
     return fen.split(' ').slice(0, 4).join(' ') + '|' + checks.w + '+' + checks.b + '|' + mode;
   }
 
-  // Never downgrade an entry: a depth-70 cloud result must survive a local depth-22 search.
-  function cachePut(key, entry){
-    const cur = engineCache[key];
-    if(cur && (cur.depth || 0) >= entry.depth) return false;
-    engineCache[key] = entry;
+  // Lichess's depth is not comparable with ours. Its thin variant entries can read depth 23
+  // off three million nodes, which is less search than our own depth-22 — so a raw depth
+  // comparison let a worse number replace a better one. A cloud result has to have actually
+  // searched, and to beat our own depth by a real margin, before it takes over the display.
+  const CLOUD_MIN_KNODES = 1000;  // i.e. one million nodes
+  const CLOUD_DEPTH_MARGIN = 4;   // plies it must beat our own search by
+
+  // Entries keep the local engine's result and the cloud's separately: `edepth`/`esan`/
+  // `escore` are ours, the top-level san/depth/score/src are whichever is currently better.
+  // Keeping ours apart matters because a cloud hit must never stop the local search.
+  function cachePut(key, e){
+    const cur = engineCache[key] || {};
+    if(e.src === 'cloud'){
+      if((e.kn || 0) < CLOUD_MIN_KNODES) return false;
+      if((cur.edepth || 0) && e.depth < (cur.edepth || 0) + CLOUD_DEPTH_MARGIN) return false;
+      if(cur.src === 'cloud' && (cur.depth || 0) >= e.depth) return false;
+      engineCache[key] = Object.assign({}, cur,
+        { san: e.san, depth: e.depth, score: e.score, src: 'cloud', kn: e.kn });
+      return true;
+    }
+    if((cur.edepth || 0) >= e.depth) return false;
+    const next = Object.assign({}, cur, { edepth: e.depth, esan: e.san, escore: e.score });
+    // Our result takes the display back unless a cloud entry is still clearly deeper.
+    if(!(cur.src === 'cloud' && (cur.depth || 0) >= e.depth + CLOUD_DEPTH_MARGIN)){
+      next.san = e.san; next.depth = e.depth; next.score = e.score; next.src = 'engine';
+    }
+    engineCache[key] = next;
     return true;
   }
+
+  // How deep our own engine has gone here — cloud hits must not count towards this.
+  function localDepth(entry){ return entry ? (entry.edepth || 0) : 0; }
 
   function trimEngineCache(){
     const keys = Object.keys(engineCache);
@@ -1956,23 +1981,39 @@
   function migrateEngineCache(){
     let ver = 0;
     try{ ver = parseInt(localStorage.getItem(ENGINE_CACHE_VER_KEY) || '0', 10) || 0; }catch(e){}
-    if(ver >= 2) return;
+    if(ver >= 3) return;
     const out = {};
     Object.keys(engineCache).forEach(old => {
+      if(!engineCache[old] || typeof engineCache[old] !== 'object') return; // drop junk entries
       const parts = old.split('|');
       const fen = (parts[0] || '').split(' ');
       // Anything before the game-mode toggle existed was three-check, the only mode then.
       const key = fen.length >= 6
         ? fen.slice(0, 4).join(' ') + '|' + (parts[1] || '0+0') + '|' + (parts[2] || 'three-check')
         : old;
+      const v = engineCache[old];
+      // Entries predating the split had one depth; anything not from the cloud was ours.
+      if(v.edepth === undefined && v.src !== 'cloud'){
+        v.edepth = v.depth || 0; v.esan = v.san; v.escore = v.score;
+      }
       const cur = out[key];
-      if(!cur || (engineCache[old].depth || 0) > (cur.depth || 0)) out[key] = engineCache[old];
+      if(!cur || (v.depth || 0) > (cur.depth || 0)) out[key] = v;
     });
     engineCache = out;
-    try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '2'); }catch(e){}
+    try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '3'); }catch(e){}
     saveEngineCache();
   }
-  migrateEngineCache();
+  // This runs at load, so a single malformed stored entry must not be able to throw and
+  // take the rest of the script — and the whole page — down with it. Worst case we start
+  // from an empty cache, which costs some re-analysis and nothing else.
+  try{
+    migrateEngineCache();
+  }catch(e){
+    console.error('Engine cache migration failed; starting fresh.', e);
+    engineCache = {};
+    try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '3'); }catch(e2){}
+    saveEngineCache();
+  }
 
   // Cache key includes the three-check tally (the same diagram with different check
   // counts is a different position to the engine) and the game mode, since the engine's
@@ -2048,6 +2089,9 @@
         san: pvMoveToSan(fen, first),
         depth: d.depth || 0,
         score: fmtScore(isMate ? 'mate' : 'cp', isMate ? pv.mate : pv.cp, 'w'),
+        // How much searching that depth actually represents. cachePut needs it, because a
+        // depth number alone says nothing about whether the entry is worth trusting.
+        kn: d.knodes || 0,
         src: 'cloud'
       };
       if(cachePut(key, entry)){ saveEngineCache(); if(onHit) onHit(); }
@@ -2064,9 +2108,19 @@
     const pos = editEnginePos();
     const c = engineCache[pos.key];
     let txt = '';
-    if(c) txt = c.san === '—' ? 'No legal moves here (game over).'
-      : 'Best: ' + c.san + ' · ' + (c.src === 'cloud' ? 'Lichess cloud' : 'engine') +
-        ' depth ' + c.depth + (c.score ? ' · ' + c.score : '');
+    if(c){
+      if(c.san === '—') txt = 'No legal moves here (game over).';
+      else{
+        txt = 'Best: ' + c.san + ' · ' + (c.src === 'cloud' ? 'Lichess cloud' : 'engine') +
+              ' depth ' + c.depth + (c.score ? ' · ' + c.score : '');
+        // When the cloud is on display, show our own result too if it disagrees, so a
+        // surprising cloud number can be checked against the engine rather than trusted blind.
+        if(c.src === 'cloud' && c.esan && (c.escore !== c.score || c.esan !== c.san)){
+          txt += '  (this engine at depth ' + c.edepth + ': ' + c.esan +
+                 (c.escore ? ' ' + c.escore : '') + ')';
+        }
+      }
+    }
     if(engineOn){
       if(engineStatus === 'loading') txt = txt || 'Loading engine (one-time ~1.6 MB)…';
       else if(engineStatus === 'failed') txt = 'Engine unavailable — try fully reloading the page.';
@@ -2111,7 +2165,7 @@
       if(mv === '(none)'){ engineCache[finished.key] = { san: '—', depth: 99, score: '', done: true }; }
       const cur = engineCache[finished.key];
       // a full (unstopped) search that gained no depth won't gain any next time either
-      if(cur && !finished.stopped && cur.depth <= finished.startDepth){
+      if(cur && !finished.stopped && localDepth(cur) <= finished.startDepth){
         if(engineTargets[finished.key] > cur.depth) engineTargets[finished.key] = 0; // drop the extra target quietly; Deeper can retry
         else cur.done = true;
       }
@@ -2229,12 +2283,12 @@
     // shouldn't delay analysis, and offline it simply never answers.
     queryCloudSoon(pos.key, pos.fen, pos.checks, renderEngineInfo);
     const cached = engineCache[pos.key];
-    if(cached && (cached.done || cached.depth >= targetOf(pos.key))){ maybePrescan(); return; }
+    if(cached && (cached.done || localDepth(cached) >= targetOf(pos.key))){ maybePrescan(); return; }
     if(engineBusy){
       if(engineBusy.key !== pos.key){ engineBusy.stopped = true; engine.postMessage('stop'); }
       return;
     }
-    engineBusy = { key: pos.key, fen: pos.fen, ucis: pos.ucis, turn: pos.turn, startDepth: cached ? cached.depth : 0 };
+    engineBusy = { key: pos.key, fen: pos.fen, ucis: pos.ucis, turn: pos.turn, startDepth: localDepth(cached) };
     engine.postMessage(pos.ucis.length ? 'position startpos moves ' + pos.ucis.join(' ') : 'position startpos');
     // search runs until the depth target is reached — 22 by default, +4 per Depth +4 press
     // (the movetime is only a safety cap so a pathological position can't spin forever)
@@ -2254,7 +2308,7 @@
         const key = posKey(t.fen(), checks, gameMode);
         if(seen[key]) return; seen[key] = true;
         const c = engineCache[key];
-        if(c && (c.done || c.depth >= ENGINE_PRESCAN_DEPTH)) return;
+        if(c && (c.done || localDepth(c) >= ENGINE_PRESCAN_DEPTH)) return;
         out.push({ key: key, fen: t.fen(), ucis: ucis.slice(), turn: t.turn() });
       };
       push();
@@ -2277,8 +2331,8 @@
     while(prescanQueue.length){
       const pos = prescanQueue.shift();
       const c = engineCache[pos.key];
-      if(c && (c.done || c.depth >= ENGINE_PRESCAN_DEPTH)) continue;
-      engineBusy = { key: pos.key, fen: pos.fen, ucis: pos.ucis, turn: pos.turn, startDepth: c ? c.depth : 0, prescan: true };
+      if(c && (c.done || localDepth(c) >= ENGINE_PRESCAN_DEPTH)) continue;
+      engineBusy = { key: pos.key, fen: pos.fen, ucis: pos.ucis, turn: pos.turn, startDepth: localDepth(c), prescan: true };
       engine.postMessage(pos.ucis.length ? 'position startpos moves ' + pos.ucis.join(' ') : 'position startpos');
       engine.postMessage('go movetime 3000 depth ' + ENGINE_PRESCAN_DEPTH);
       break;
@@ -2307,7 +2361,7 @@
     }
     const pos = editEnginePos();
     const c = engineCache[pos.key];
-    engineTargets[pos.key] = Math.max(c ? c.depth : 0, targetOf(pos.key)) + 4;
+    engineTargets[pos.key] = Math.max(localDepth(c), targetOf(pos.key)) + 4;
     if(c) delete c.done;
     analyzeEditPosition();
   });
