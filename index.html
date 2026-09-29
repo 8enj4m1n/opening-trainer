@@ -1926,27 +1926,48 @@
   // off three million nodes, which is less search than our own depth-22 — so a raw depth
   // comparison let a worse number replace a better one. A cloud result has to have actually
   // searched, and to beat our own depth by a real margin, before it takes over the display.
-  const CLOUD_MIN_KNODES = 1000;  // i.e. one million nodes
-  const CLOUD_DEPTH_MARGIN = 4;   // plies it must beat our own search by
+  const CLOUD_DEPTH_MARGIN = 4;      // plies it must beat our own search by
+  const CLOUD_MIN_KNODES_STD = 1000; // one million nodes, for standard chess
+  // Lichess's three-check entries are sparse and contributed piecemeal, so neighbouring
+  // positions come from different searches and openly contradict each other. Measured from
+  // the live API: the start reads +0.17 at depth 65 off 80 billion nodes and calls c4 best,
+  // yet after that same c4 it reads -0.32 off 75 million, and after 1.e4 it reads +2.07.
+  // Thin variant entries therefore have to clear a far higher bar.
+  const CLOUD_MIN_KNODES_VARIANT = 100000; // a hundred million nodes
+  // However deep a cloud entry claims to be, it doesn't get to contradict a real search of
+  // this position in this variant running right now. Beyond this gap we keep our own number.
+  const CLOUD_AGREE_CP = 100;        // one pawn
+
+  function cloudMinKnodes(){
+    return gameMode === 'three-check' ? CLOUD_MIN_KNODES_VARIANT : CLOUD_MIN_KNODES_STD;
+  }
 
   // Entries keep the local engine's result and the cloud's separately: `edepth`/`esan`/
-  // `escore` are ours, the top-level san/depth/score/src are whichever is currently better.
-  // Keeping ours apart matters because a cloud hit must never stop the local search.
+  // `escore`/`ecp` are ours, the top-level san/depth/score/src are whichever is currently
+  // better. Keeping ours apart matters because a cloud hit must never stop the local search.
   function cachePut(key, e){
     const cur = engineCache[key] || {};
     if(e.src === 'cloud'){
-      if((e.kn || 0) < CLOUD_MIN_KNODES) return false;
+      if((e.kn || 0) < cloudMinKnodes()) return false;
       if((cur.edepth || 0) && e.depth < (cur.edepth || 0) + CLOUD_DEPTH_MARGIN) return false;
       if(cur.src === 'cloud' && (cur.depth || 0) >= e.depth) return false;
+      // Our own engine has searched this exact position in this exact variant. If the cloud
+      // disagrees with it by more than a pawn, the cloud entry is the one to distrust.
+      if(cur.ecp !== undefined && e.cp !== undefined &&
+         Math.abs(e.cp - cur.ecp) > CLOUD_AGREE_CP) return false;
       engineCache[key] = Object.assign({}, cur,
-        { san: e.san, depth: e.depth, score: e.score, src: 'cloud', kn: e.kn });
+        { san: e.san, depth: e.depth, score: e.score, cp: e.cp, src: 'cloud', kn: e.kn });
       return true;
     }
     if((cur.edepth || 0) >= e.depth) return false;
-    const next = Object.assign({}, cur, { edepth: e.depth, esan: e.san, escore: e.score });
-    // Our result takes the display back unless a cloud entry is still clearly deeper.
-    if(!(cur.src === 'cloud' && (cur.depth || 0) >= e.depth + CLOUD_DEPTH_MARGIN)){
-      next.san = e.san; next.depth = e.depth; next.score = e.score; next.src = 'engine';
+    const next = Object.assign({}, cur,
+      { edepth: e.depth, esan: e.san, escore: e.score, ecp: e.cp });
+    // Our result takes the display back when a cloud entry contradicts it, and otherwise
+    // whenever the cloud is no longer clearly deeper.
+    const contradicts = cur.src === 'cloud' && cur.cp !== undefined && e.cp !== undefined &&
+                        Math.abs(cur.cp - e.cp) > CLOUD_AGREE_CP;
+    if(contradicts || !(cur.src === 'cloud' && (cur.depth || 0) >= e.depth + CLOUD_DEPTH_MARGIN)){
+      next.san = e.san; next.depth = e.depth; next.score = e.score; next.cp = e.cp; next.src = 'engine';
     }
     engineCache[key] = next;
     return true;
@@ -2089,6 +2110,8 @@
         san: pvMoveToSan(fen, first),
         depth: d.depth || 0,
         score: fmtScore(isMate ? 'mate' : 'cp', isMate ? pv.mate : pv.cp, 'w'),
+        // Already White-relative, so no flip — matches how the local cp is stored.
+        cp: isMate ? (pv.mate > 0 ? PZ_MATE_CP - pv.mate : -(PZ_MATE_CP + pv.mate)) : pv.cp,
         // How much searching that depth actually represents. cachePut needs it, because a
         // depth number alone says nothing about whether the entry is worth trusting.
         kn: d.knodes || 0,
@@ -2184,10 +2207,15 @@
       const depth = parseInt(d[1], 10);
       const cur = engineCache[engineBusy.key];
       if(cur && (cur.depth || 0) >= depth) return;
+      // cp is kept White-relative and numeric so a cloud entry can be checked against it.
+      const localCp = sc
+        ? (engineBusy.turn === 'w' ? 1 : -1) * pzScoreToCp(sc[1], parseInt(sc[2], 10))
+        : undefined;
       cachePut(engineBusy.key, {
         san: pvMoveToSan(engineBusy.fen, pv[1]),
         depth: depth,
         score: sc ? fmtScore(sc[1], parseInt(sc[2], 10), engineBusy.turn) : '',
+        cp: localCp,
         src: 'engine'
       });
       saveEngineCache(); // persist each new depth immediately, not just at search end
@@ -3594,8 +3622,9 @@
     if(job.key === anaKey()){
       // Full-strength result, so it belongs in the shared memory alongside the editor's.
       if(job.pv && job.pv.length){
+        const whiteCp = job.turn === 'w' ? job.cp : -job.cp;
         if(cachePut(anaPosKey(), { san: pvMoveToSan(job.fen, job.pv[0]), depth: job.depth,
-                                   score: pzFmtEval(job.turn === 'w' ? job.cp : -job.cp), src: 'engine' })){
+                                   score: pzFmtEval(whiteCp), cp: whiteCp, src: 'engine' })){
           saveEngineCache();
         }
       }
