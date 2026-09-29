@@ -2002,7 +2002,24 @@
   function migrateEngineCache(){
     let ver = 0;
     try{ ver = parseInt(localStorage.getItem(ENGINE_CACHE_VER_KEY) || '0', 10) || 0; }catch(e){}
-    if(ver >= 3) return;
+
+    // v4: three-check cloud entries already stored are unreliable (see cloudEnabled).
+    // Fall back to our own engine's result for that position where we kept one, and drop
+    // the entry otherwise, so stale cloud numbers don't keep being served from storage.
+    if(ver >= 3 && ver < 4){
+      Object.keys(engineCache).forEach(k => {
+        const e = engineCache[k];
+        if(!e || typeof e !== 'object' || e.src !== 'cloud' || k.indexOf('|three-check') === -1) return;
+        if(e.esan){
+          e.san = e.esan; e.depth = e.edepth; e.score = e.escore; e.cp = e.ecp;
+          e.src = 'engine'; delete e.kn;
+        }else delete engineCache[k];
+      });
+      try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '4'); }catch(e){}
+      saveEngineCache();
+      return;
+    }
+    if(ver >= 4) return;
     const out = {};
     Object.keys(engineCache).forEach(old => {
       if(!engineCache[old] || typeof engineCache[old] !== 'object') return; // drop junk entries
@@ -2021,7 +2038,7 @@
       if(!cur || (v.depth || 0) > (cur.depth || 0)) out[key] = v;
     });
     engineCache = out;
-    try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '3'); }catch(e){}
+    try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '4'); }catch(e){}
     saveEngineCache();
   }
   // This runs at load, so a single malformed stored entry must not be able to throw and
@@ -2032,7 +2049,7 @@
   }catch(e){
     console.error('Engine cache migration failed; starting fresh.', e);
     engineCache = {};
-    try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '3'); }catch(e2){}
+    try{ localStorage.setItem(ENGINE_CACHE_VER_KEY, '4'); }catch(e2){}
     saveEngineCache();
   }
 
@@ -2088,7 +2105,16 @@
     return gameMode === 'three-check' ? base + ' +' + checks.w + '+' + checks.b : base;
   }
 
+  // Standard chess only. Lichess's three-check entries don't form a coherent series: the
+  // start reads +0.17 with a plain standard-chess principal variation, while 1.e4 reads
+  // +2.07, 1.e4 c5 reads +2.81 and 1.e4 e5 reads +6.36 — each measured from the live API.
+  // For stepping through a line, one engine giving comparable numbers at every position is
+  // worth more than isolated entries that are individually deeper but disagree with each
+  // other, so the local engine is the only source in that mode.
+  function cloudEnabled(){ return gameMode !== 'three-check'; }
+
   function queryCloud(key, fen, checks, onHit){
+    if(!cloudEnabled()) return;
     if(cloudMiss[key] || cloudInFlight || Date.now() < cloudBackoffUntil) return;
     cloudInFlight = true;
     const url = 'https://lichess.org/api/cloud-eval?fen=' + encodeURIComponent(cloudFen(fen, checks)) +
