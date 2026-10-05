@@ -495,6 +495,7 @@
       <div id="tab-analysis" style="display:none;">
         <div class="board-actions" style="margin-bottom:10px;">
           <button class="primary" id="anaEngineBtn" type="button">Engine: off</button>
+          <button class="ghost" id="anaDeeperBtn" type="button">Depth +4</button>
         </div>
         <div class="hint" id="anaEngineInfo" style="min-height:40px;"></div>
 
@@ -3452,6 +3453,10 @@
   let anaGame = null;       // { moves, label, url } of a loaded game, kept immutable
   const ANA_TARGET_DEPTH = 26;  // a position already stored at this depth isn't re-searched
   let anaPvShown = null;        // { pkey, depth, sans } of the live search's line
+  // Per-position depth targets raised by the Depth +4 button. Not persisted, same as the
+  // editor's: the evaluations themselves are remembered, the ambition for them isn't.
+  let anaDepthTargets = {};
+  function anaTargetOf(pkey){ return Math.max(ANA_TARGET_DEPTH, anaDepthTargets[pkey] || 0); }
   let anaSel = null, anaTargets = [];
   let anaFlip = false;
   let anaOn = false;        // engine analysis switched on
@@ -3618,11 +3623,13 @@
     // already had — otherwise the headline depth and the line shown would disagree.
     const live = (anaPvShown && anaPvShown.pkey === pkey &&
                   anaPvShown.depth >= (known.edepth || 0)) ? anaPvShown.sans : null;
+    const target = anaTargetOf(pkey);
     anaEngineInfoEl.textContent =
       (known.src === 'cloud' ? 'Lichess cloud' : 'Engine') + ' depth ' + known.depth +
       ' · ' + (known.score || '') +
       ' · best: ' + (live && live.length ? live.join(' ') : known.san) +
-      (searching ? ' · searching…' : '');
+      (searching ? ' · searching to depth ' + target + '…'
+                 : (target > ANA_TARGET_DEPTH ? ' · target ' + target : ''));
   }
 
   // One search at a time: a new position never starts a search directly, it only asks the
@@ -3641,13 +3648,17 @@
     // Already taken this position to the full target on an earlier visit, so there is
     // nothing to gain by searching it again from scratch — show what we stored.
     const known = engineCache[pkey];
-    if(known && (known.edepth || 0) >= ANA_TARGET_DEPTH){ renderAnaEngine(); return; }
+    const target = anaTargetOf(pkey);
+    if(known && (known.edepth || 0) >= target){ renderAnaEngine(); return; }
     // pkey is captured with the job: results must be filed against the position they were
     // actually searched for, not against whatever is on the board when they arrive.
     engineBusy = { ana: true, key: anaKey(), pkey: pkey, ucis: anaUcis.slice(), fen: anaChess.fen(),
                    turn: anaChess.turn(), depth: 0, cp: null, pv: null, stopped: false };
     engine.postMessage(anaUcis.length ? 'position startpos moves ' + anaUcis.join(' ') : 'position startpos');
-    engine.postMessage('go movetime 12000 depth ' + ANA_TARGET_DEPTH);
+    // A deliberately deepened search gets far longer to get there; the default browse-along
+    // search stays on a short leash so stepping through a game keeps up.
+    const cap = target > ANA_TARGET_DEPTH ? 120000 : 12000;
+    engine.postMessage('go movetime ' + cap + ' depth ' + target);
     renderAnaEngine();
   }
 
@@ -3736,6 +3747,25 @@
     anaRebuild(); renderAnalysis();
   });
   $('anaFlipBtn').addEventListener('click', () => { anaFlip = !anaFlip; renderAnaBoard(); });
+
+  $('anaDeeperBtn').addEventListener('click', () => {
+    if(anaGameOver()) return;
+    if(!anaOn){ anaOn = true; anaEngineBtn.textContent = 'Engine: on'; loadEngine(); }
+    const pkey = anaPosKey();
+    const known = engineCache[pkey];
+    // Raise above whatever has actually been reached, so pressing it always asks for more
+    // than we already have rather than re-requesting a depth already stored.
+    anaDepthTargets[pkey] = Math.max((known && known.edepth) || 0, anaTargetOf(pkey)) + 4;
+    // A search already running for this position was told to stop at the old target, so
+    // restart it; its bestmove hands back to dispatchEngine, which re-enters anaAnalyze.
+    if(engineBusy && engineBusy.ana && engineBusy.key === anaKey()){
+      engineBusy.stopped = true;
+      engine.postMessage('stop');
+    }else{
+      anaAnalyze();
+    }
+    renderAnaEngine();
+  });
 
   anaEngineBtn.addEventListener('click', () => {
     anaOn = !anaOn;
