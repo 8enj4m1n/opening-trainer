@@ -1983,7 +1983,17 @@
     keys.slice(0, keys.length - ENGINE_CACHE_MAX).forEach(k => delete engineCache[k]);
   }
 
+  // Searches report a new depth several times a second, and writing straight through meant
+  // serialising the whole store — up to 5000 entries — every time. Coalesce those; callers
+  // that must not lose the write (scan end, migration) still use saveEngineCache directly.
+  let engineCacheSaveTimer = null;
+  function saveEngineCacheSoon(){
+    if(engineCacheSaveTimer) return;
+    engineCacheSaveTimer = setTimeout(() => { engineCacheSaveTimer = null; saveEngineCache(); }, 1500);
+  }
+
   function saveEngineCache(){
+    if(engineCacheSaveTimer){ clearTimeout(engineCacheSaveTimer); engineCacheSaveTimer = null; }
     try{
       trimEngineCache();
       localStorage.setItem(ENGINE_CACHE_KEY, JSON.stringify(engineCache));
@@ -2244,7 +2254,7 @@
         cp: localCp,
         src: 'engine'
       });
-      saveEngineCache(); // persist each new depth immediately, not just at search end
+      saveEngineCacheSoon(); // coalesced: searches report a new depth several times a second
       renderEngineInfo();
     }
   }
@@ -3440,6 +3450,8 @@
   let anaUcis = [];         // same line in UCI, for the engine
   let anaIdx = 0;           // how many of anaMoves are played
   let anaGame = null;       // { moves, label, url } of a loaded game, kept immutable
+  const ANA_TARGET_DEPTH = 26;  // a position already stored at this depth isn't re-searched
+  let anaPvShown = null;        // { pkey, depth, sans } of the live search's line
   let anaSel = null, anaTargets = [];
   let anaFlip = false;
   let anaOn = false;        // engine analysis switched on
@@ -3567,7 +3579,12 @@
     return out;
   }
 
-  function renderAnaEngine(job){
+  // Rendered from the shared memory rather than straight from the live search. cachePut only
+  // admits a result that beats what's stored, so a search restarting at depth 1 can no longer
+  // wipe a deeper result remembered from an earlier visit — the display holds until the new
+  // search overtakes it. anaPvShown carries the live principal variation so the full line is
+  // still shown while a search is actually running.
+  function renderAnaEngine(){
     if(!anaOn){
       anaEngineInfoEl.textContent = 'Engine off — switch it on for a live evaluation.';
       anaEvalBadge.textContent = '—';
@@ -3588,25 +3605,24 @@
       anaEvalBadge.textContent = '—';
       return;
     }
-    if(!job || job.cp === null || job.key !== anaKey()){
-      // Nothing from this search yet — show whatever the shared memory already knows about
-      // this position, from an earlier visit or from the Lichess cloud.
-      const known = engineCache[anaPosKey()];
-      if(known && known.san && known.san !== '—'){
-        anaEvalBadge.textContent = known.score || '…';
-        anaEngineInfoEl.textContent = (known.src === 'cloud' ? 'Lichess cloud' : 'Known') +
-          ' depth ' + known.depth + ' · best: ' + known.san + ' · searching…';
-      }else{
-        anaEngineInfoEl.textContent = 'Thinking…';
-        anaEvalBadge.textContent = '…'; // never leave the previous position's eval on screen
-      }
+    const pkey = anaPosKey();
+    const known = engineCache[pkey];
+    const searching = !!(engineBusy && engineBusy.ana && engineBusy.key === anaKey());
+    if(!known || !known.san || known.san === '—'){
+      anaEngineInfoEl.textContent = searching ? 'Thinking…' : 'No evaluation stored for this position yet.';
+      anaEvalBadge.textContent = '…'; // never leave the previous position's eval on screen
       return;
     }
-    const white = job.turn === 'w' ? job.cp : -job.cp;
-    anaEvalBadge.textContent = pzFmtEval(white);
-    const pv = anaPvSan(job.fen, job.pv);
-    anaEngineInfoEl.textContent = 'Depth ' + job.depth + ' · ' + pzFmtEval(white) +
-      (pv.length ? ' · best: ' + pv.join(' ') : '');
+    anaEvalBadge.textContent = known.score || '…';
+    // Prefer the live line, but only once the running search is at least as deep as what we
+    // already had — otherwise the headline depth and the line shown would disagree.
+    const live = (anaPvShown && anaPvShown.pkey === pkey &&
+                  anaPvShown.depth >= (known.edepth || 0)) ? anaPvShown.sans : null;
+    anaEngineInfoEl.textContent =
+      (known.src === 'cloud' ? 'Lichess cloud' : 'Engine') + ' depth ' + known.depth +
+      ' · ' + (known.score || '') +
+      ' · best: ' + (live && live.length ? live.join(' ') : known.san) +
+      (searching ? ' · searching…' : '');
   }
 
   // One search at a time: a new position never starts a search directly, it only asks the
@@ -3614,18 +3630,25 @@
   // then, so a stale search can't paint its eval onto the wrong position.
   function anaAnalyze(){
     if(!anaActive || !anaOn || scanActive) return;
-    if(engineStatus !== 'ready'){ renderAnaEngine(null); return; }
-    if(anaGameOver()){ renderAnaEngine(null); return; }
+    if(engineStatus !== 'ready'){ renderAnaEngine(); return; }
+    if(anaGameOver()){ renderAnaEngine(); return; }
     if(engineBusy){
       if(engineBusy.key !== anaKey()){ engineBusy.stopped = true; engine.postMessage('stop'); }
       return;
     }
-    queryCloudSoon(anaPosKey(), anaChess.fen(), anaChecks, () => renderAnaEngine(null));
-    engineBusy = { ana: true, key: anaKey(), ucis: anaUcis.slice(), fen: anaChess.fen(),
+    const pkey = anaPosKey();
+    queryCloudSoon(pkey, anaChess.fen(), anaChecks, renderAnaEngine);
+    // Already taken this position to the full target on an earlier visit, so there is
+    // nothing to gain by searching it again from scratch — show what we stored.
+    const known = engineCache[pkey];
+    if(known && (known.edepth || 0) >= ANA_TARGET_DEPTH){ renderAnaEngine(); return; }
+    // pkey is captured with the job: results must be filed against the position they were
+    // actually searched for, not against whatever is on the board when they arrive.
+    engineBusy = { ana: true, key: anaKey(), pkey: pkey, ucis: anaUcis.slice(), fen: anaChess.fen(),
                    turn: anaChess.turn(), depth: 0, cp: null, pv: null, stopped: false };
     engine.postMessage(anaUcis.length ? 'position startpos moves ' + anaUcis.join(' ') : 'position startpos');
-    engine.postMessage('go movetime 12000 depth 26');
-    renderAnaEngine(null);
+    engine.postMessage('go movetime 12000 depth ' + ANA_TARGET_DEPTH);
+    renderAnaEngine();
   }
 
   function onAnalysisLine(line){
@@ -3645,17 +3668,17 @@
     job.cp = pzScoreToCp(sc[1], parseInt(sc[2], 10));
     const pvm = line.match(/\bpv (.+)$/);
     if(pvm) job.pv = pvm[1].trim().split(/\s+/).filter(t => /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(t));
-    if(job.key === anaKey()){
-      // Full-strength result, so it belongs in the shared memory alongside the editor's.
-      if(job.pv && job.pv.length){
-        const whiteCp = job.turn === 'w' ? job.cp : -job.cp;
-        if(cachePut(anaPosKey(), { san: pvMoveToSan(job.fen, job.pv[0]), depth: job.depth,
-                                   score: pzFmtEval(whiteCp), cp: whiteCp, src: 'engine' })){
-          saveEngineCache();
-        }
+    // Filed against the job's own position, not the board's, so stepping away mid-search no
+    // longer throws the work away — it's there when you come back.
+    if(job.pv && job.pv.length && job.pkey){
+      const whiteCp = job.turn === 'w' ? job.cp : -job.cp;
+      if(cachePut(job.pkey, { san: pvMoveToSan(job.fen, job.pv[0]), depth: job.depth,
+                              score: pzFmtEval(whiteCp), cp: whiteCp, src: 'engine' })){
+        saveEngineCacheSoon();
       }
-      renderAnaEngine(job); // only paint the position on screen
+      anaPvShown = { pkey: job.pkey, depth: job.depth, sans: anaPvSan(job.fen, job.pv) };
     }
+    if(job.key === anaKey()) renderAnaEngine(); // only paint the position on screen
   }
 
   // ---- Rendering ----
@@ -3696,7 +3719,7 @@
 
     renderAnaBoard();
     anaAnalyze();
-    if(!anaOn || engineStatus !== 'ready') renderAnaEngine(null);
+    if(!anaOn || engineStatus !== 'ready') renderAnaEngine();
   }
 
   // ---- Navigation ----
@@ -3719,7 +3742,7 @@
     anaEngineBtn.textContent = 'Engine: ' + (anaOn ? 'on' : 'off');
     if(anaOn){ loadEngine(); anaAnalyze(); }
     else if(engineBusy && engineBusy.ana){ engineBusy.stopped = true; engine.postMessage('stop'); }
-    renderAnaEngine(null);
+    renderAnaEngine();
   });
 
   // ---- Loading games ----
